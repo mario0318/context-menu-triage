@@ -34,6 +34,10 @@ try {
     & npm exec -- postject $outputExe NODE_SEA_BLOB (Join-Path $dist 'triage.blob') --sentinel-fuse NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2
     if ($LASTEXITCODE) { throw 'SEA injection failed' }
 
+    $package = Get-Content -LiteralPath (Join-Path $projectRoot 'package.json') -Raw | ConvertFrom-Json
+    & node (Join-Path $projectRoot 'scripts\set-exe-metadata.mjs') $outputExe $package.version
+    if ($LASTEXITCODE) { throw 'executable metadata update failed' }
+
     $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)
     $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
     if (-not $SkipSign -and ($hasCertificate -xor $hasPassword)) {

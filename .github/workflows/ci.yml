@@ -35,6 +35,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build:exe -- --SkipSign
+      - name: Verify executable metadata
+        shell: powershell
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $info = (Get-Item .\dist\context-menu-triage.exe).VersionInfo
+          if ($info.ProductName -ne 'Context Menu Triage') { throw "Unexpected ProductName: $($info.ProductName)" }
+          if (-not $info.ProductVersion.StartsWith("$version.")) { throw "Unexpected ProductVersion: $($info.ProductVersion)" }
+          if ($info.OriginalFilename -ne 'context-menu-triage.exe') { throw "Unexpected OriginalFilename: $($info.OriginalFilename)" }
       - run: .\dist\context-menu-triage.exe audit --scope broad --quiet
       - uses: actions/upload-artifact@v6
         with:

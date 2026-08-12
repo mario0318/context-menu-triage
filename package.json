@@ -14,7 +14,7 @@
     "context-menu-triage": "./triage.js"
   },
   "scripts": {
-    "check": "node --check triage.js && node --check lib/core.js && node --check lib/gui.js",
+    "check": "node --check triage.js && node --check lib/core.js && node --check lib/gui.js && node --check scripts/set-exe-metadata.mjs",
     "test": "node --test test/core.test.js test/gui.test.js",
     "test:windows": "node --test test/windows.integration.test.js",
     "build:exe": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-exe.ps1",
@@ -35,6 +35,8 @@
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
-    "postject": "^1.0.0-alpha.6"
+    "pe-library": "^2.0.1",
+    "postject": "^1.0.0-alpha.6",
+    "resedit": "^3.0.2"
   }
 }

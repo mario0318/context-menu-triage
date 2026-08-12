@@ -13,7 +13,7 @@ Context Menu Triage separates the evidence that matters: HKLM versus HKCU regist
 
 ## Install
 
-Stable binaries will be published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases) after the Authenticode signing gate is configured. The executable contains the GUI and CLI and has no runtime dependencies; double-clicking it opens the GUI. CI currently publishes an unsigned test artifact for maintainers, not a stable end-user release.
+Stable binaries will be published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases) after the SignPath Foundation application and Authenticode signing gate are complete. The executable contains the GUI and CLI and has no runtime dependencies; double-clicking it opens the GUI. CI currently publishes an unsigned test artifact for maintainers, not a stable end-user release.
 
 From source, install Node.js 20 or newer and run:
 
@@ -95,4 +95,6 @@ The read and dry-run surfaces are covered by automated tests. A controlled live 
 
 See [BUILD.md](BUILD.md) for the maintained implementation contract and [SECURITY.md](SECURITY.md) for reporting guidance.
 
-Maintainer signing setup is documented in [SIGNING.md](SIGNING.md).
+## Code Signing Policy
+
+The project is applying for **Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)**. Stable releases will remain gated until that public-trust integration is accepted and verified. See the [code signing policy](CODE_SIGNING_POLICY.md), [privacy policy](PRIVACY.md), and maintainer [signing setup](SIGNING.md).

@@ -1,35 +1,43 @@
 # Signing Setup
 
-Stable Windows releases use Azure Artifact Signing Public Trust with GitHub OIDC. No certificate or client secret is stored in GitHub.
+Stable Windows releases use the SignPath Foundation open-source program and SignPath's GitHub trusted-build integration. Signing is not active until the application is accepted and SignPath provisions the project.
 
-## Prepared Infrastructure
+## Application
 
-- Azure subscription: `db9f81ff-8fae-4453-9bee-bf9ada4f777a`
-- Entra application: `context-menu-triage-github`
-- Application ID: `5c342bf0-674c-49f2-b117-ab8b418dff97`
-- Federated subject: `repo:mario0318/context-menu-triage:environment:release`
-- GitHub environment: `release`
+- Project: `Context Menu Triage`
+- Repository: <https://github.com/mario0318/context-menu-triage>
+- License: MIT
+- Artifact: portable Windows x64 PE executable
+- Build system: GitHub Actions on GitHub-hosted Windows runners
+- Project slug requested: `context-menu-triage`
+- Signing policy slug requested: `release-signing`
+- Artifact configuration slug requested: `windows-executable`
 
-The `Microsoft.CodeSigning` provider is registered and the Azure CLI `artifact-signing` extension is installed on the maintainer machine.
+The public [code signing policy](CODE_SIGNING_POLICY.md) documents team roles, privacy, release controls, system changes, and removal. SignPath acceptance is discretionary; repository preparation does not imply approval.
 
-## Interactive Step
+## SignPath Configuration
 
-Azure Public Trust identity validation must be completed in the Azure portal and cannot be automated with the CLI. Before creating the account, confirm the Azure billing profile's legal name, account type, and address match the government ID that will be used.
+After acceptance:
 
-1. Open [Artifact Signing Accounts](https://portal.azure.com/#view/HubsExtension/BrowseResource/resourceType/Microsoft.CodeSigning%2FcodeSigningAccounts).
-2. Create a Basic account in a supported region. Billing begins when the account is created.
-3. Assign the maintainer the **Artifact Signing Identity Verifier** role on the account.
-4. Create an **Individual / Public** identity validation and complete the external identity check.
-5. After validation succeeds, create a certificate profile with type **PublicTrust**.
+1. Install the SignPath GitHub App for this repository.
+2. Configure a GitHub trusted build system for the repository.
+3. Configure the artifact as a ZIP containing one `context-menu-triage.exe` PE file with Authenticode signing enabled.
+4. Enforce `ProductName = Context Menu Triage` and release-version metadata.
+5. Restrict release signing to version tags and GitHub-hosted runners.
+6. Require one manual approval for every signing request.
+7. Create a SignPath API token with submitter permission only.
 
-Then complete the role assignment and GitHub variables:
+Set these GitHub repository variables:
 
-```powershell
-.\scripts\Complete-ArtifactSigningSetup.ps1 `
-  -ResourceGroup <resource-group> `
-  -AccountName <account-name> `
-  -ProfileName <profile-name> `
-  -Region EastUS
-```
+- `SIGNPATH_ORGANIZATION_ID`
+- `SIGNPATH_PROJECT_SLUG`
+- `SIGNPATH_SIGNING_POLICY_SLUG`
+- `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`
 
-Push tag `v1.1.0`. The release workflow builds the executable, authenticates through OIDC, signs and timestamps it, verifies `Get-AuthenticodeSignature` returns `Valid`, regenerates the post-signing SHA-256 checksum, and publishes the executable with its SBOM.
+Set `SIGNPATH_API_TOKEN` as a GitHub Actions secret in the `release` environment. Do not store the token in the repository.
+
+## Release
+
+The release tag must match `package.json`, including any prerelease suffix. The workflow builds the executable, enforces PE metadata, uploads the unsigned artifact to GitHub Actions, submits its artifact ID to SignPath, waits for manual approval, and downloads the signed result. It then runs the executable, requires `Get-AuthenticodeSignature` to return `Valid`, generates the checksum after signing, and publishes the signed executable with its SBOM.
+
+Unsigned CI artifacts are for testing only and must never be attached to a stable release.

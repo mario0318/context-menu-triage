@@ -6,7 +6,7 @@ on:
 
 permissions:
   contents: write
-  id-token: write
+  actions: read
 
 jobs:
   release:
@@ -22,27 +22,40 @@ jobs:
       - name: Build executable
         shell: powershell
         run: npm run build:exe -- --SkipSign
-      - name: Azure login
-        uses: azure/login@v3
+      - name: Validate release version
+        shell: powershell
+        run: |
+          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
+          if ($packageVersion -ne $tagVersion) { throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion" }
+          $info = (Get-Item .\dist\context-menu-triage.exe).VersionInfo
+          if ($info.ProductName -ne 'Context Menu Triage') { throw "Unexpected ProductName: $($info.ProductName)" }
+          if (-not $info.ProductVersion.StartsWith("$packageVersion.")) { throw "Unexpected ProductVersion: $($info.ProductVersion)" }
+          if ($info.OriginalFilename -ne 'context-menu-triage.exe') { throw "Unexpected OriginalFilename: $($info.OriginalFilename)" }
+      - name: Upload unsigned executable
+        id: upload-unsigned
+        uses: actions/upload-artifact@v7
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - name: Sign executable with Azure Artifact Signing
-        uses: azure/artifact-signing-action@v2
+          name: context-menu-triage-unsigned
+          path: dist/context-menu-triage.exe
+          if-no-files-found: error
+      - name: Submit SignPath signing request
+        uses: signpath/github-action-submit-signing-request@v2
         with:
-          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\dist\context-menu-triage.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: Context Menu Triage
-          description-url: https://github.com/mario0318/context-menu-triage
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ github.workspace }}\dist\signed
       - name: Verify executable
         shell: powershell
         run: |
+          $signed = Get-ChildItem .\dist\signed -Filter context-menu-triage.exe -File -Recurse
+          if ($signed.Count -ne 1) { throw "Expected one signed executable, found $($signed.Count)" }
+          Copy-Item -LiteralPath $signed.FullName -Destination .\dist\context-menu-triage.exe -Force
           .\dist\context-menu-triage.exe audit --scope broad --quiet
           $signature = Get-AuthenticodeSignature .\dist\context-menu-triage.exe
           if ($signature.Status -ne 'Valid') { throw "Stable releases require a valid Authenticode signature. Status: $($signature.Status)" }

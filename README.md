@@ -65,6 +65,8 @@ Mutating CLI commands are dry runs unless `--apply` is supplied. Before every ap
 
 Filters are available in the CLI and GUI: `--query`, `--publisher`, `--signature`, `--hive`, `--view`, `--state`, and `--blocked yes|no`. Audit output supports JSON, CSV, and SARIF for inventory and baseline workflows.
 
+The GUI follows the Windows/browser color preference by default. Its Theme selector can persist an explicit Light or Dark override in local browser storage.
+
 Snapshot schema v2 is published at [`docs/snapshot.schema.json`](docs/snapshot.schema.json). Legacy array snapshots from v1 remain importable.
 
 ## Trust Model

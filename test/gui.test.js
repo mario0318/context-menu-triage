@@ -12,6 +12,8 @@ test('rendered GUI contains parseable client JavaScript and launch token', () =>
 
   assert.equal(scripts.length, 1);
   assert.match(html, /Context Menu Triage/);
+  assert.match(html, /prefers-color-scheme:dark/);
+  assert.match(html, /localStorage\.setItem\('triage-theme'/);
   assert.match(scripts[0], /fixture-token/);
   assert.doesNotThrow(() => new vm.Script(scripts[0]));
 });

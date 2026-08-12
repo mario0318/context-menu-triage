@@ -29,7 +29,7 @@ This program will not transfer any information to other networked systems unless
 
 ## System Changes
 
-The program announces changes and defaults mutation commands to dry-run mode. Applied changes are limited to the registry locations documented in [BUILD.md](BUILD.md), create rollback evidence, and require explicit confirmation. HKLM changes require administrator rights.
+The program announces changes and defaults mutation commands to dry-run mode. Applied changes are limited to the registry locations documented in the [README safety section](README.md#safety), create rollback evidence, and require explicit confirmation. HKLM changes require administrator rights.
 
 ## Removal
 

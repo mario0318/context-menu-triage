@@ -93,7 +93,7 @@ Automated source and live-registry tests run on Windows with Node 20, 22, and 24
 
 The read and dry-run surfaces are covered by automated tests. A controlled live HKLM block/unblock/import cycle should still be performed for each release candidate on a disposable third-party handler before calling the write path certified.
 
-See [BUILD.md](BUILD.md) for the maintained implementation contract and [SECURITY.md](SECURITY.md) for reporting guidance.
+See [SECURITY.md](SECURITY.md) for security boundaries and reporting guidance, and [CONTRIBUTING.md](CONTRIBUTING.md) for development requirements.
 
 ## Code Signing Policy
 

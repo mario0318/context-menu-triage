@@ -1,13 +1,23 @@
 {
   "name": "context-menu-triage",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "Inspect and reversibly block Windows Explorer context menu handlers.",
   "main": "triage.js",
+  "files": [
+    "triage.js",
+    "lib/",
+    "known-conflicts.json",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "context-menu-triage": "./triage.js"
   },
   "scripts": {
-    "check": "node --check triage.js",
+    "check": "node --check triage.js && node --check lib/core.js && node --check lib/gui.js",
+    "test": "node --test test/core.test.js test/gui.test.js",
+    "test:windows": "node --test test/windows.integration.test.js",
+    "build:exe": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-exe.ps1",
     "list": "node triage.js",
     "gui": "node triage.js gui"
   },
@@ -18,6 +28,13 @@
     "shell-extension"
   ],
   "author": "mario0318",
-  "license": "UNLICENSED",
-  "private": true
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "postject": "^1.0.0-alpha.6"
+  }
 }

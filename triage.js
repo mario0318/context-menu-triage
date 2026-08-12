@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * triage.js  ...  context menu triage (tonight scaffold)
+ * Context Menu Triage
  *
  * enumerates Windows Explorer context menu handlers, resolves each CLSID to its
  * DLL / publisher / Authenticode status, flags third-party and orphaned handlers,
@@ -18,12 +18,16 @@
  *   node triage.js blocked              show what is currently blocked
  *   node triage.js export <file>        snapshot full state to json (your rollback file)
  *   node triage.js import <file>        dry run restore block list from snapshot
+ *   node triage.js undo-last            dry run the last automatic rollback snapshot
+ *   node triage.js audit --format json|csv|sarif [--output file]
+ *   node triage.js diff <before> <after>
+ *   node triage.js baseline create|check <file>
  *   node triage.js classic-menu status  show Win11/classic context menu mode
  *   node triage.js classic-menu on      dry run classic menu toggle (add --apply)
  *   node triage.js classic-menu off     dry run Win11 menu toggle (add --apply)
  *   node triage.js gui                  serve local HTTP GUI on 127.0.0.1:7373
  *
- * windows + node 16+ only. run terminal as admin only when you --apply.
+ * Windows + Node 20+ only. Run as admin only when applying HKLM writes.
  */
 
 'use strict';
@@ -34,6 +38,20 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const { URL } = require('url');
+const renderGui = require('./lib/gui');
+const {
+  GUID_RE,
+  blockPlan,
+  clsidOrThrow,
+  cook,
+  diffHandlers,
+  filterRows,
+  handlersToCsv,
+  handlersToSarif,
+  snapshotDocument,
+  snapshotHandlers,
+  sortRows,
+} = require('./lib/core');
 
 const BLOCKED_KEY = 'HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Shell Extensions\\Blocked';
 const CLASSIC_ROOT = 'HKCU\\Software\\Classes\\CLSID\\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}';
@@ -41,7 +59,27 @@ const CLASSIC_INPROC = CLASSIC_ROOT + '\\InprocServer32';
 const CACHE = path.join(os.tmpdir(), 'triage-cache.json');
 const LOG = path.join(process.cwd(), 'triage-log.json');
 const CONFLICTS = path.join(__dirname, 'known-conflicts.json');
-const GUID_RE = /^\{[0-9A-Fa-f-]{36}\}$/;
+const LAST_CHANGE = path.join(os.homedir(), '.context-menu-triage-last-change.json');
+const VERSION = require('./package.json').version;
+const HELP = `usage:
+  context-menu-triage                       open the GUI (standalone executable)
+  node triage.js                            list third-party handlers
+  context-menu-triage list [--all] [--json] [--scope all|broad]
+  context-menu-triage block <n|clsid> [--apply] [--restart-explorer]
+  context-menu-triage unblock <n|clsid> [--apply] [--restart-explorer]
+  context-menu-triage blocked
+  context-menu-triage export <file> [--scope all|broad]
+  context-menu-triage import <file> [--apply]
+  context-menu-triage undo-last [--apply]
+  context-menu-triage audit --format json|csv|sarif [--output file] [--fail-on level]
+  context-menu-triage diff <before> <after> [--json]
+  context-menu-triage baseline create|check <file>
+  context-menu-triage classic-menu status|on|off [--apply]
+  context-menu-triage conflicts [--scope all|broad]
+  context-menu-triage gui [--elevate] [--port 7373] [--scope all|broad]
+
+reads work unelevated. registry writes require an administrator terminal.
+default scope is all registered legacy ContextMenuHandlers; broad scans seven common surfaces.`;
 
 const NOCOLOR = process.argv.includes('--no-color') || !process.stdout.isTTY;
 const c = (code, s) => (NOCOLOR ? s : `\x1b[${code}m${s}\x1b[0m`);
@@ -52,80 +90,180 @@ const dim = s => c('2', s), red = s => c('31', s), grn = s => c('32', s),
 const PS = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
-function Resolve-Clsid($clsid) {
-  $paths = @("Registry::HKEY_CLASSES_ROOT\CLSID\$clsid","Registry::HKEY_CLASSES_ROOT\WOW6432Node\CLSID\$clsid")
-  foreach ($cp in $paths) {
-    $ck = Get-Item -LiteralPath $cp -ErrorAction SilentlyContinue
-    if ($ck) {
+function Open-Key($hive, $subkey, $view) {
+  $h = if ($hive -eq 'HKCU') {
+    [Microsoft.Win32.RegistryHive]::CurrentUser
+  } else {
+    [Microsoft.Win32.RegistryHive]::LocalMachine
+  }
+  $v = if ($view -eq '32') {
+    [Microsoft.Win32.RegistryView]::Registry32
+  } else {
+    [Microsoft.Win32.RegistryView]::Registry64
+  }
+  $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($h, $v)
+  try { return $base.OpenSubKey($subkey) } finally { $base.Dispose() }
+}
+function Resolve-Clsid($clsid, $view) {
+  foreach ($hive in @('HKCU', 'HKLM')) {
+    $subkey = "Software\Classes\CLSID\$clsid"
+    $ck = Open-Key $hive $subkey $view
+    if (-not $ck) { continue }
+    try {
       $name = $ck.GetValue('')
-      $ip = Get-Item -LiteralPath ($cp + '\InprocServer32') -ErrorAction SilentlyContinue
+      $ip = $ck.OpenSubKey('InprocServer32')
       $dll = $null
-      if ($ip) { $dll = $ip.GetValue('') }
-      return @{ name = $name; dll = $dll }
+      if ($ip) { try { $dll = $ip.GetValue('') } finally { $ip.Dispose() } }
+      return [pscustomobject]@{
+        hive = $hive; view = $view; key = "$hive\$subkey"
+        clsidRegistered = $true; inprocRegistered = ($null -ne $ip)
+        name = $name; dll = $dll
+      }
+    } finally { $ck.Dispose() }
+  }
+  return $null
+}
+function Expand-Dll($dll, $view) {
+  if (-not $dll) { return $null }
+  $expanded = [Environment]::ExpandEnvironmentVariables(('' + $dll)).Trim().Trim('"')
+  if ($expanded -and -not ($expanded -match '[\\/]')) {
+    $bases = if ($view -eq '32') {
+      @(($env:SystemRoot + '\SysWOW64'), ($env:SystemRoot + '\System32'))
+    } else {
+      @(($env:SystemRoot + '\System32'), ($env:SystemRoot + '\SysWOW64'))
+    }
+    foreach ($base in $bases) {
+      $candidate = Join-Path $base $expanded
+      if (Test-Path -LiteralPath $candidate) { return $candidate }
     }
   }
-  return @{ name = $null; dll = $null }
+  return $expanded
 }
-$parents = @(
-  'Registry::HKEY_CLASSES_ROOT\*\shellex\ContextMenuHandlers',
-  'Registry::HKEY_CLASSES_ROOT\AllFilesystemObjects\shellex\ContextMenuHandlers',
-  'Registry::HKEY_CLASSES_ROOT\Directory\shellex\ContextMenuHandlers',
-  'Registry::HKEY_CLASSES_ROOT\Directory\Background\shellex\ContextMenuHandlers',
-  'Registry::HKEY_CLASSES_ROOT\Drive\shellex\ContextMenuHandlers',
-  'Registry::HKEY_CLASSES_ROOT\Folder\shellex\ContextMenuHandlers',
-  'Registry::HKEY_CLASSES_ROOT\LibraryFolder\shellex\ContextMenuHandlers'
-)
+function Test-ParentWritable($dll) {
+  if (-not $dll) { return $false }
+  $directory = Split-Path -Parent $dll
+  if (-not $directory -or -not (Test-Path -LiteralPath $directory -PathType Container)) { return $false }
+  $principal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+  $identities = @($principal.Identity.Name)
+  $identities += @($principal.Identity.Groups | ForEach-Object {
+    try { $_.Translate([Security.Principal.NTAccount]).Value } catch { $null }
+  })
+  $allow = $false; $deny = $false
+  $writeRights = [Security.AccessControl.FileSystemRights]'Write,CreateFiles,Modify,FullControl'
+  foreach ($rule in (Get-Acl -LiteralPath $directory).Access) {
+    if ($identities -notcontains $rule.IdentityReference.Value) { continue }
+    if (($rule.FileSystemRights -band $writeRights) -eq 0) { continue }
+    if ($rule.AccessControlType -eq 'Deny') { $deny = $true } else { $allow = $true }
+  }
+  return ($allow -and -not $deny)
+}
+function Get-ParentPaths($hive, $view) {
+  $prefix = if ($hive -eq 'HKCU') { 'HKEY_CURRENT_USER' } else { 'HKEY_LOCAL_MACHINE' }
+  if ($TriageScope -eq 'broad') {
+    return @(
+      '*\shellex\ContextMenuHandlers',
+      'AllFilesystemObjects\shellex\ContextMenuHandlers',
+      'Directory\shellex\ContextMenuHandlers',
+      'Directory\Background\shellex\ContextMenuHandlers',
+      'Drive\shellex\ContextMenuHandlers',
+      'Folder\shellex\ContextMenuHandlers',
+      'LibraryFolder\shellex\ContextMenuHandlers'
+    ) | ForEach-Object { "$prefix\Software\Classes\$_" }
+  }
+  $output = & reg.exe query "$hive\Software\Classes" /f ContextMenuHandlers /k /s "/reg:$view" 2>$null
+  return @($output | ForEach-Object { ('' + $_).Trim() } | Where-Object {
+    $_ -match '^HKEY_(LOCAL_MACHINE|CURRENT_USER)\\.+\\shellex\\ContextMenuHandlers$'
+    -and $_ -notmatch '(?i)\\Software\\Classes\\WOW6432Node\\'
+  })
+}
 $blocked = @{}
 $bk = Get-Item -LiteralPath ('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked') -ErrorAction SilentlyContinue
 if ($bk) { foreach ($n in $bk.GetValueNames()) { if ($n) { $blocked[$n.ToUpper()] = $true } } }
 $guid = '^\{[0-9A-Fa-f-]{36}\}$'
 $map = @{}
-foreach ($p in $parents) {
-  $surface = [regex]::Match($p, 'HKEY_CLASSES_ROOT\\(.+?)\\shellex').Groups[1].Value
-  foreach ($k in (Get-ChildItem -LiteralPath $p -ErrorAction SilentlyContinue)) {
-    $def = $k.GetValue('')
-    $clsid = $null
-    if ($def -and ($def -match $guid)) { $clsid = $def }
-    elseif ($k.PSChildName -match $guid) { $clsid = $k.PSChildName }
-    if (-not $clsid) { continue }
-    $clsid = $clsid.ToUpper()
-    if ($map.ContainsKey($clsid)) { $map[$clsid].surfaces += $surface; continue }
-    $r = Resolve-Clsid $clsid
-    $dll = $r.dll
-    if ($dll) {
-      $dll = [Environment]::ExpandEnvironmentVariables($dll).Trim('"')
-      if ($dll -and -not ($dll -match '[\\/]')) {
-        foreach ($base in @(($env:SystemRoot + '\System32'), ($env:SystemRoot + '\SysWOW64'))) {
-          $cand = Join-Path $base $dll
-          if (Test-Path -LiteralPath $cand -ErrorAction SilentlyContinue) { $dll = $cand; break }
+foreach ($view in @('64', '32')) {
+  foreach ($hive in @('HKLM', 'HKCU')) {
+    $prefix = if ($hive -eq 'HKCU') { 'HKEY_CURRENT_USER\' } else { 'HKEY_LOCAL_MACHINE\' }
+    foreach ($parentPath in (Get-ParentPaths $hive $view)) {
+      $subkey = $parentPath.Substring($prefix.Length)
+      $parent = Open-Key $hive $subkey $view
+      if (-not $parent) { continue }
+      try {
+        $handlers = @()
+        $parentDefault = '' + $parent.GetValue('')
+        if ($parentDefault -match $guid) {
+          $handlers += [pscustomobject]@{ label = Split-Path $subkey -Leaf; clsid = $parentDefault }
         }
-      }
-    }
-    $exists = $false; $status = 'None'; $signer = $null; $underWin = $false
-    if ($dll) {
-      $wr = ('' + $env:SystemRoot).ToLower()
-      if ($wr -and $dll.ToLower().StartsWith($wr)) { $underWin = $true }
-      if (Test-Path -LiteralPath $dll -ErrorAction SilentlyContinue) {
-        $exists = $true
-        $sig = Get-AuthenticodeSignature -LiteralPath $dll -ErrorAction SilentlyContinue
-        if ($null -ne $sig) {
-          $status = $sig.Status.ToString()
-          if ($null -ne $sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }
+        foreach ($childName in $parent.GetSubKeyNames()) {
+          $child = $parent.OpenSubKey($childName)
+          if (-not $child) { continue }
+          try { $def = '' + $child.GetValue('') } finally { $child.Dispose() }
+          $clsid = if ($def -match $guid) { $def } elseif ($childName -match $guid) { $childName } else { $null }
+          if ($clsid) { $handlers += [pscustomobject]@{ label = $childName; clsid = $clsid } }
         }
-      }
-    }
-    $map[$clsid] = [pscustomobject]@{
-      clsid = $clsid; label = ('' + $k.PSChildName); name = $r.name; dll = $dll
-      exists = $exists; sigStatus = $status; signer = $signer; underWindows = $underWin
-      surfaces = @($surface); blocked = [bool]$blocked[$clsid]
+        foreach ($handler in $handlers) {
+          $clsid = $handler.clsid.ToUpper()
+          $classesParent = $subkey.Substring('Software\Classes\'.Length)
+          $surface = [regex]::Replace($classesParent, '(?i)\\shellex\\ContextMenuHandlers$', '')
+          $registration = [pscustomobject]@{
+            hive = $hive; view = $view; parent = $surface
+            key = "$hive\$subkey\$($handler.label)"; label = $handler.label
+          }
+          if (-not $map.ContainsKey($clsid)) {
+            $map[$clsid] = [pscustomobject]@{ clsid = $clsid; registrations = [Collections.ArrayList]@() }
+          }
+          [void]$map[$clsid].registrations.Add($registration)
+        }
+      } finally { $parent.Dispose() }
     }
   }
 }
-@($map.Values) | ConvertTo-Json -Depth 5
+$results = @(foreach ($entry in @($map.Values)) {
+  $servers = [Collections.ArrayList]@()
+  foreach ($view in @('64', '32')) {
+    $server = Resolve-Clsid $entry.clsid $view
+    if (-not $server) { continue }
+    $server.dll = Expand-Dll $server.dll $view
+    [void]$servers.Add($server)
+  }
+  $primary = @($servers | Where-Object dll | Select-Object -First 1)
+  if (-not $primary) { $primary = @($servers | Select-Object -First 1) }
+  $primary = $primary | Select-Object -First 1
+  $dll = if ($primary) { $primary.dll } else { $null }
+  $exists = [bool]($dll -and (Test-Path -LiteralPath $dll))
+  $status = 'None'; $signer = $null; $underWin = $false
+  if ($dll) {
+    $wr = ('' + $env:SystemRoot).TrimEnd('\').ToLowerInvariant() + '\'
+    $underWin = $dll.ToLowerInvariant().StartsWith($wr)
+    if ($exists) {
+      $sig = Get-AuthenticodeSignature -LiteralPath $dll -ErrorAction SilentlyContinue
+      if ($null -ne $sig) {
+        $status = $sig.Status.ToString()
+        if ($null -ne $sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }
+      }
+    }
+  }
+  $labels = @($entry.registrations | ForEach-Object label | Sort-Object -Unique)
+  $surfaces = @($entry.registrations | ForEach-Object parent | Sort-Object -Unique)
+  $clsidRegistered = @($servers).Count -gt 0
+  $inprocRegistered = [bool]($primary -and $primary.inprocRegistered)
+  $writableMissingPath = [bool]($dll -and -not $exists -and (Test-ParentWritable $dll))
+  [pscustomobject]@{
+    clsid = $entry.clsid; label = ($labels -join '; '); name = if ($primary) { $primary.name } else { $null }
+    dll = $dll; exists = $exists; sigStatus = $status; signer = $signer; underWindows = $underWin
+    surfaces = $surfaces; registrations = @($entry.registrations); comServers = @($servers)
+    clsidRegistered = $clsidRegistered; inprocRegistered = $inprocRegistered
+    writableMissingPath = $writableMissingPath
+    blocked = [bool]$blocked[$entry.clsid]
+  }
+})
+$results | ConvertTo-Json -Depth 8
 `;
 
-function enumerate() {
-  const b64 = Buffer.from(PS, 'utf16le').toString('base64');
+function enumerate(scope = 'all') {
+  if (!['all', 'broad'].includes(scope)) fail('scope must be all or broad');
+  const script = `$TriageScope = '${scope}'\n${PS}`;
+  const b64 = Buffer.from(script, 'utf16le').toString('base64');
   let raw;
   try {
     raw = execFileSync('powershell',
@@ -139,6 +277,17 @@ function enumerate() {
   return data.map(cook).sort(sortRows);
 }
 
+let enumerationCache = null;
+function enumerateCached(scope, maxAgeMs = 5000) {
+  const now = Date.now();
+  if (enumerationCache && enumerationCache.scope === scope && now - enumerationCache.at < maxAgeMs) {
+    return enumerationCache.rows;
+  }
+  const rows = enumerate(scope);
+  enumerationCache = { scope, at: Date.now(), rows };
+  return rows;
+}
+
 function powershellEnv() {
   const env = { ...process.env };
   const systemRoot = env.SystemRoot || 'C:\\Windows';
@@ -148,35 +297,6 @@ function powershellEnv() {
     path.join(systemRoot, 'system32\\WindowsPowerShell\\v1.0\\Modules'),
   ].join(';');
   return env;
-}
-
-function cook(x) {
-  const signer = x.signer || '';
-  const cn = (signer.match(/CN=([^,]+)/) || [])[1];
-  const msSigner = /Microsoft (Corporation|Windows)/i.test(signer);
-  const validSig = x.sigStatus === 'Valid';
-  const inWin = x.underWindows === true;
-  // path first: a DLL under %SystemRoot% is Windows/system UNLESS it is validly
-  // signed by a non-Microsoft party (rare third party masquerading in system dirs).
-  // this is the robust signal: catalog-signed OS files often expose no signer cert
-  // via Get-AuthenticodeSignature, so we do not rely on the signature alone.
-  const isSystem = inWin && !(validSig && signer && !msSigner);
-  const isMs = isSystem || (validSig && msSigner);
-  const orphan = !x.exists;
-  let pub, reason;
-  if (isSystem)            { pub = 'Windows';   reason = 'system path'; }
-  else if (isMs)           { pub = 'Microsoft'; reason = 'ms-signed'; }
-  else if (orphan)         { pub = 'ORPHAN';    reason = 'dll missing'; }
-  else if (validSig && cn) { pub = cn.trim();   reason = 'signed'; }
-  else if (cn)             { pub = cn.trim();   reason = 'sig:' + x.sigStatus; }
-  else                     { pub = 'UNSIGNED';  reason = 'no signature'; }
-  const trusted = isMs;
-  return { ...x, isMs, isSystem, trusted, pub, reason, thirdParty: !isMs, orphan };
-}
-function sortRows(a, b) {
-  // orphans first, then unsigned/problem third-party, signed third-party, microsoft last
-  const rank = r => (r.orphan ? 0 : r.thirdParty && r.sigStatus !== 'Valid' ? 1 : r.thirdParty ? 2 : 3);
-  return rank(a) - rank(b) || (a.pub || '').localeCompare(b.pub || '');
 }
 
 // --- rendering ---------------------------------------------------------------
@@ -226,11 +346,6 @@ function resolveTarget(arg) {
   fail('give a row number (from list) or a full {CLSID}');
 }
 
-function clsidOrThrow(clsid) {
-  if (!GUID_RE.test(clsid || '')) throw new Error(`invalid CLSID: ${clsid}`);
-  return clsid.toUpperCase();
-}
-
 function validateClsid(clsid) {
   try { return clsidOrThrow(clsid); }
   catch (e) { fail(e.message); }
@@ -246,6 +361,53 @@ function logAppend(entry) {
   try { arr = JSON.parse(fs.readFileSync(LOG, 'utf8')); } catch {}
   arr.push({ ts: new Date().toISOString(), ...entry });
   fs.writeFileSync(LOG, JSON.stringify(arr, null, 2));
+}
+
+function optionValue(args, name, fallback = null) {
+  const equals = args.find(arg => arg.startsWith(`${name}=`));
+  if (equals) return equals.slice(name.length + 1);
+  const index = args.indexOf(name);
+  return index >= 0 && args[index + 1] && !args[index + 1].startsWith('--') ? args[index + 1] : fallback;
+}
+
+function scanScope(args) {
+  return optionValue(args, '--scope', 'all');
+}
+
+function machineMetadata(scope) {
+  let windows = {};
+  try {
+    const command = String.raw`$ProgressPreference='SilentlyContinue'; $ErrorActionPreference='SilentlyContinue'; Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' | Select-Object ProductName,DisplayVersion,CurrentBuild,UBR | ConvertTo-Json -Compress`;
+    const encoded = Buffer.from(command, 'utf16le').toString('base64');
+    windows = JSON.parse(execFileSync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded,
+    ], { encoding: 'utf8', env: powershellEnv() }).trim());
+  } catch {}
+  return {
+    hostname: os.hostname(),
+    platform: os.platform(),
+    architecture: os.arch(),
+    release: os.release(),
+    windows,
+    scanScope: scope,
+    toolVersion: VERSION,
+  };
+}
+
+let mutationBackup = null;
+function ensureMutationBackup(action, scope = 'all') {
+  if (mutationBackup) return mutationBackup;
+  const filename = `triage-auto-before-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  const snapshot = writeSnapshot(filename, scope);
+  mutationBackup = snapshot.file;
+  fs.writeFileSync(LAST_CHANGE, JSON.stringify({
+    schemaVersion: 1,
+    createdAt: new Date().toISOString(),
+    action,
+    snapshot: mutationBackup,
+  }, null, 2));
+  logAppend({ action: 'AUTO_SNAPSHOT', forAction: action, file: mutationBackup });
+  return mutationBackup;
 }
 
 function regQuery(args) {
@@ -280,7 +442,7 @@ function restartExplorer() {
   logAppend({ action: 'RESTART_EXPLORER' });
 }
 
-function block(arg, apply, on) {
+function block(arg, apply, on, restart = false) {
   const t = resolveTarget(arg);
   const verb = on ? 'BLOCK' : 'UNBLOCK';
   if (!apply) {
@@ -288,12 +450,20 @@ function block(arg, apply, on) {
     console.log(dim(on
       ? `  would: reg add "${BLOCKED_KEY}" /v ${t.clsid} /t REG_SZ /d "${t.name}" /f`
       : `  would: reg delete "${BLOCKED_KEY}" /v ${t.clsid} /f`));
+    if (restart) console.log(dim('  would restart Explorer after apply.'));
     console.log(dim('  add --apply to commit. restart Explorer after (taskkill /f /im explorer.exe & start explorer).\n'));
     return;
   }
+  const backup = ensureMutationBackup(verb);
+  console.log(dim(`  rollback snapshot: ${backup}`));
   setBlocked(t.clsid, t.name, on);
   console.log(grn(`\n  ${verb} ok  ${t.clsid}`));
-  console.log(dim('  restart Explorer to apply:  taskkill /f /im explorer.exe & start explorer\n'));
+  if (restart) {
+    restartExplorer();
+    console.log(grn('  Explorer restarted.\n'));
+  } else {
+    console.log(dim('  restart Explorer to apply:  taskkill /f /im explorer.exe & start explorer\n'));
+  }
 }
 
 function showBlocked() {
@@ -348,11 +518,12 @@ function classicMenu(args, apply) {
   }
 }
 
-function writeSnapshot(file) {
-  const rows = enumerate();
+function writeSnapshot(file, scope = 'all') {
+  const rows = enumerate(scope);
   const out = file || `triage-snapshot-${Date.now()}.json`;
-  fs.writeFileSync(out, JSON.stringify(rows, null, 2));
-  return { file: path.resolve(out), rows };
+  const document = snapshotDocument(rows, machineMetadata(scope));
+  fs.writeFileSync(out, JSON.stringify(document, null, 2));
+  return { file: path.resolve(out), rows, document };
 }
 
 function importPlan(snapshotFile) {
@@ -360,26 +531,8 @@ function importPlan(snapshotFile) {
   let snapshot;
   try { snapshot = JSON.parse(fs.readFileSync(snapshotFile, 'utf8')); }
   catch (e) { throw badRequest(`could not read snapshot: ${e.message || e}`); }
-  if (!Array.isArray(snapshot)) throw badRequest('snapshot must be an array written by `node triage.js export`');
-  const desired = new Map();
-  for (const row of snapshot) {
-    if (!row || !row.clsid) continue;
-    const clsid = clsidOrThrow(row.clsid);
-    desired.set(clsid, {
-      blocked: row.blocked === true,
-      name: row.name || row.label || clsid,
-    });
-  }
-  const currentBlocked = getBlockedClsids();
-  const toBlock = [];
-  const toUnblock = [];
-  for (const [clsid, row] of desired) {
-    if (row.blocked && !currentBlocked.has(clsid)) toBlock.push({ clsid, name: row.name });
-  }
-  for (const [clsid, row] of desired) {
-    if (!row.blocked && currentBlocked.has(clsid)) toUnblock.push({ clsid, name: row.name });
-  }
-  return { toBlock, toUnblock, total: desired.size };
+  try { return blockPlan(snapshot, getBlockedClsids()); }
+  catch (e) { throw badRequest(e.message || String(e)); }
 }
 
 function badRequest(message) {
@@ -406,15 +559,106 @@ function importSnapshot(snapshotFile, apply) {
     return;
   }
   if (!isAdmin()) fail('import writes need admin. relaunch this terminal as administrator, then retry with --apply');
+  const backup = ensureMutationBackup('IMPORT_SNAPSHOT');
+  console.log(dim(`  rollback snapshot: ${backup}`));
   for (const x of plan.toBlock) setBlocked(x.clsid, x.name, true);
   for (const x of plan.toUnblock) setBlocked(x.clsid, x.name, false);
   logAppend({ action: 'IMPORT_SNAPSHOT', file: path.resolve(snapshotFile), blocked: plan.toBlock.length, unblocked: plan.toUnblock.length });
   console.log(grn('  import applied. restart Explorer to apply shell changes.\n'));
 }
 
+function undoLast(apply) {
+  let state;
+  try { state = JSON.parse(fs.readFileSync(LAST_CHANGE, 'utf8')); }
+  catch { fail('no automatic rollback snapshot is recorded'); }
+  if (!state.snapshot || !fs.existsSync(state.snapshot)) fail('the recorded rollback snapshot no longer exists');
+  console.log(`\n  last change: ${state.action || 'unknown'}  ${state.createdAt || ''}`);
+  console.log(`  rollback file: ${state.snapshot}`);
+  importSnapshot(state.snapshot, apply);
+}
+
+function readSnapshot(file) {
+  if (!file) fail('snapshot file required');
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (e) { fail(`could not read snapshot: ${e.message || e}`); }
+}
+
+function renderDiff(diff, asJson = false) {
+  if (asJson) return console.log(JSON.stringify(diff, null, 2));
+  console.log(`\n  added: ${diff.added.length}  removed: ${diff.removed.length}  changed: ${diff.changed.length}`);
+  diff.added.forEach(row => console.log(`    + ${row.clsid}`));
+  diff.removed.forEach(row => console.log(`    - ${row.clsid}`));
+  diff.changed.forEach(row => console.log(`    ~ ${row.clsid}`));
+  console.log('');
+}
+
+function diffCommand(beforeFile, afterFile, asJson) {
+  renderDiff(diffHandlers(readSnapshot(beforeFile), readSnapshot(afterFile)), asJson);
+}
+
+function baselineCommand(args) {
+  const action = args[1];
+  const file = args[2];
+  const scope = scanScope(args);
+  if (!['create', 'check'].includes(action) || !file) fail('baseline needs create|check <file>');
+  if (action === 'create') {
+    const snapshot = writeSnapshot(file, scope);
+    console.log(grn(`\n  baseline written: ${snapshot.file}\n`));
+    return;
+  }
+  const current = snapshotDocument(enumerate(scope), machineMetadata(scope));
+  const diff = diffHandlers(readSnapshot(file), current);
+  renderDiff(diff, args.includes('--json'));
+  if (diff.added.length || diff.removed.length || diff.changed.length) process.exitCode = 2;
+}
+
+function auditCommand(args) {
+  const scope = scanScope(args);
+  const rows = filterRows(enumerate(scope), cliFilters(args, true));
+  const format = optionValue(args, '--format', args.includes('--csv') ? 'csv' : args.includes('--sarif') ? 'sarif' : 'json');
+  const output = optionValue(args, '--output');
+  let content;
+  if (format === 'json') content = JSON.stringify(snapshotDocument(rows, machineMetadata(scope)), null, 2) + '\n';
+  else if (format === 'csv') content = handlersToCsv(rows);
+  else if (format === 'sarif') content = JSON.stringify(handlersToSarif(rows, { version: VERSION }), null, 2) + '\n';
+  else fail('audit --format must be json, csv, or sarif');
+  if (output) fs.writeFileSync(output, content);
+  else if (!args.includes('--quiet')) process.stdout.write(content);
+  const failOn = optionValue(args, '--fail-on');
+  if (failOn) {
+    const failed = rows.some(row => failOn === 'orphan' ? row.orphan
+      : failOn === 'unsigned' ? row.sigStatus !== 'Valid'
+      : failOn === 'third-party' ? row.thirdParty
+      : failOn === 'writable-missing-path' ? row.writableMissingPath
+      : false);
+    if (!['orphan', 'unsigned', 'third-party', 'writable-missing-path'].includes(failOn)) fail('unsupported --fail-on value');
+    if (failed) process.exitCode = 2;
+  }
+}
+
+function cliFilters(args, showMicrosoftDefault = false) {
+  const blocked = optionValue(args, '--blocked');
+  return {
+    showMicrosoft: args.includes('--all') || showMicrosoftDefault,
+    query: optionValue(args, '--query', ''),
+    publisher: optionValue(args, '--publisher'),
+    signature: optionValue(args, '--signature'),
+    hive: optionValue(args, '--hive'),
+    view: optionValue(args, '--view'),
+    state: optionValue(args, '--state'),
+    blocked: blocked === 'yes' ? true : blocked === 'no' ? false : undefined,
+  };
+}
+
 function readConflictsDb() {
   let data;
-  try { data = JSON.parse(fs.readFileSync(CONFLICTS, 'utf8')); }
+  const candidates = [
+    path.join(path.dirname(process.execPath), 'known-conflicts.json'),
+    CONFLICTS,
+  ];
+  const file = candidates.find(candidate => fs.existsSync(candidate));
+  if (!file) return [];
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); }
   catch (e) { throw new Error(`could not read known-conflicts.json: ${e.message || e}`); }
   if (!Array.isArray(data)) throw new Error('known-conflicts.json must contain an array');
   return data.filter(entry => {
@@ -507,23 +751,26 @@ function apiTokenValid(req, token) {
   return req.headers['x-triage-token'] === token || url.searchParams.get('t') === token;
 }
 
-async function handleApi(req, res, route, token) {
+async function handleApi(req, res, route, token, scope, port) {
   if (!apiTokenValid(req, token)) return sendJson(res, 403, { error: 'Invalid or missing API token.' });
-  if (req.method === 'GET' && route === '/api/handlers') return sendJson(res, 200, enumerate());
+  if (req.method === 'GET' && route === '/api/handlers') return sendJson(res, 200, enumerateCached(scope));
   if (req.method === 'GET' && route === '/api/blocked') return sendJson(res, 200, [...getBlockedClsids()]);
   if (req.method === 'GET' && route === '/api/classic-menu') return sendJson(res, 200, { enabled: classicMenuEnabled() });
   if (req.method === 'GET' && route === '/api/admin') return sendJson(res, 200, { admin: isAdmin() });
-  if (req.method === 'GET' && route === '/api/conflicts') return sendJson(res, 200, computeConflicts(enumerate()));
+  if (req.method === 'GET' && route === '/api/conflicts') return sendJson(res, 200, computeConflicts(enumerateCached(scope)));
+  if (req.method === 'GET' && route === '/api/meta') return sendJson(res, 200, { version: VERSION, scope, machine: machineMetadata(scope) });
 
   if (req.method === 'POST' && route === '/api/block') {
     if (adminRequired(res)) return;
     const body = await readBody(req);
-    return sendJson(res, 200, setBlockedRaw(body.clsid, body.name, true));
+    const backup = ensureMutationBackup('GUI_BLOCK', scope);
+    return sendJson(res, 200, { ...setBlockedRaw(body.clsid, body.name, true), backup });
   }
   if (req.method === 'POST' && route === '/api/unblock') {
     if (adminRequired(res)) return;
     const body = await readBody(req);
-    return sendJson(res, 200, setBlockedRaw(body.clsid, body.clsid, false));
+    const backup = ensureMutationBackup('GUI_UNBLOCK', scope);
+    return sendJson(res, 200, { ...setBlockedRaw(body.clsid, body.clsid, false), backup });
   }
   if (req.method === 'POST' && route === '/api/classic-menu') {
     const body = await readBody(req);
@@ -531,19 +778,25 @@ async function handleApi(req, res, route, token) {
   }
   if (req.method === 'POST' && route === '/api/export') {
     const body = await readBody(req);
-    const snapshot = writeSnapshot(body.file);
+    const snapshot = writeSnapshot(body.file, scope);
     return sendJson(res, 200, { file: snapshot.file, count: snapshot.rows.length });
   }
   if (req.method === 'POST' && route === '/api/import') {
     const body = await readBody(req);
     const plan = importPlan(body.file);
     if ((plan.toBlock.length || plan.toUnblock.length) && adminRequired(res)) return;
+    const backup = plan.toBlock.length || plan.toUnblock.length ? ensureMutationBackup('GUI_IMPORT', scope) : null;
     for (const x of plan.toBlock) setBlockedRaw(x.clsid, x.name, true);
     for (const x of plan.toUnblock) setBlockedRaw(x.clsid, x.name, false);
     if (plan.toBlock.length || plan.toUnblock.length) {
       logAppend({ action: 'IMPORT_SNAPSHOT', file: path.resolve(body.file), blocked: plan.toBlock.length, unblocked: plan.toUnblock.length });
     }
-    return sendJson(res, 200, { applied: true, blocked: plan.toBlock.length, unblocked: plan.toUnblock.length });
+    return sendJson(res, 200, { applied: true, blocked: plan.toBlock.length, unblocked: plan.toUnblock.length, backup });
+  }
+  if (req.method === 'POST' && route === '/api/relaunch-admin') {
+    if (isAdmin()) return sendJson(res, 200, { alreadyAdmin: true });
+    relaunchGuiAsAdmin(port + 1, scope);
+    return sendJson(res, 200, { launched: true, port: port + 1 });
   }
   if (req.method === 'POST' && route === '/api/restart-explorer') {
     restartExplorer();
@@ -552,221 +805,18 @@ async function handleApi(req, res, route, token) {
   sendJson(res, 404, { error: 'not found' });
 }
 
-function guiHtml(token) {
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Context Menu Triage</title>
-<style>
-:root { color-scheme: light; --bg: #f6f7f9; --panel: #ffffff; --line: #d7dce2; --text: #18202a; --muted: #66717f; --danger: #b42318; --warn: #9a6700; --ok: #067647; --accent: #155eef; }
-* { box-sizing: border-box; }
-body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; color: var(--text); background: var(--bg); }
-header { height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
-h1 { margin: 0; font-size: 18px; font-weight: 650; }
-main { padding: 14px 18px 22px; }
-.toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
-.group { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--line); background: var(--panel); border-radius: 6px; }
-button, input[type="text"] { font: inherit; }
-button { border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 5px; padding: 6px 10px; cursor: pointer; min-height: 32px; }
-button:hover { border-color: #9aa7b5; }
-button.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
-button.danger { color: #fff; background: var(--danger); border-color: var(--danger); }
-button:disabled { opacity: .55; cursor: not-allowed; }
-input[type="text"] { min-width: 260px; border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px; min-height: 32px; }
-label { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); }
-.banner { display: none; margin-bottom: 12px; padding: 10px 12px; border: 1px solid #f2c94c; border-radius: 6px; background: #fffbeb; color: #6f4e00; }
-.banner.show { display: block; }
-.status { color: var(--muted); min-height: 20px; }
-.status.error { color: var(--danger); }
-.status.ok { color: var(--ok); }
-.table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
-table { width: 100%; border-collapse: collapse; min-width: 980px; table-layout: fixed; }
-th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; font-size: 13px; }
-th { position: sticky; top: 0; background: #eef1f5; z-index: 1; font-size: 12px; color: #364152; text-transform: uppercase; letter-spacing: 0; }
-tr:last-child td { border-bottom: 0; }
-.pub { width: 170px; }
-.sig { width: 120px; }
-.blocked { width: 92px; }
-.action { width: 96px; }
-.name { width: 310px; }
-.dll { width: 180px; color: var(--muted); }
-.conflict { margin-top: 5px; color: var(--warn); font-size: 12px; line-height: 1.35; }
-.pill { display: inline-block; min-width: 64px; text-align: center; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--line); background: #f8fafc; }
-.pill.on { color: var(--danger); border-color: #f2a29b; background: #fff1f0; }
-.pill.good { color: var(--ok); border-color: #9fd6b8; background: #effaf3; }
-.pill.warn { color: var(--warn); border-color: #f4d18b; background: #fff8e6; }
-.mono { font-family: Consolas, "SFMono-Regular", monospace; }
-@media (max-width: 760px) {
-  header { height: auto; min-height: 58px; align-items: flex-start; flex-direction: column; gap: 4px; padding: 12px; }
-  main { padding: 12px; }
-  .group { width: 100%; justify-content: space-between; }
-  input[type="text"] { min-width: 0; width: 100%; }
-}
-</style>
-</head>
-<body>
-<header>
-  <h1>Context Menu Triage</h1>
-  <div class="status" id="summary"></div>
-</header>
-<main>
-  <div class="banner" id="adminBanner">Administrator terminal required for disable, enable, and import actions. Browsing and classic menu changes remain available.</div>
-  <div class="toolbar">
-    <div class="group">
-      <label><input type="checkbox" id="showAll"> Show all</label>
-      <button id="refresh">Refresh</button>
-    </div>
-    <div class="group">
-      <strong>Menu</strong>
-      <button id="classicToggle" class="primary">Loading</button>
-    </div>
-    <div class="group">
-      <input id="filePath" type="text" placeholder="snapshot.json">
-      <button id="exportBtn">Export</button>
-      <button id="importBtn">Import</button>
-    </div>
-    <div class="group">
-      <button id="restartBtn" class="danger" style="display:none">Restart Explorer</button>
-    </div>
-  </div>
-  <div class="status" id="status"></div>
-  <div class="table-wrap">
-    <table>
-      <thead><tr><th class="pub">Publisher</th><th class="sig">Signature</th><th class="blocked">Blocked</th><th class="name">Name</th><th class="dll">DLL</th><th class="action">Action</th></tr></thead>
-      <tbody id="rows"></tbody>
-    </table>
-  </div>
-</main>
-<script>
-const apiToken = ${JSON.stringify(token)};
-let handlers = [];
-let conflicts = [];
-let admin = false;
-let classic = false;
-let dirty = false;
-
-const el = id => document.getElementById(id);
-const basename = p => p ? p.split(/[\\\\/]/).pop() : '';
-const setStatus = (msg, kind) => { const s = el('status'); s.textContent = msg || ''; s.className = 'status ' + (kind || ''); };
-
-async function api(path, options) {
-  options = options || {};
-  options.headers = Object.assign({}, options.headers || {}, { 'X-Triage-Token': apiToken });
-  const res = await fetch(path, options);
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(body.error || res.statusText);
-    err.body = body;
-    throw err;
-  }
-  return body;
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-async function load() {
-  setStatus('Loading');
-  [admin, classic, handlers, conflicts] = await Promise.all([
-    api('/api/admin').then(x => x.admin),
-    api('/api/classic-menu').then(x => x.enabled),
-    api('/api/handlers'),
-    api('/api/conflicts')
-  ]);
-  el('adminBanner').classList.toggle('show', !admin);
-  el('classicToggle').textContent = classic ? 'Use Win11 menu' : 'Use classic menu';
-  render();
-  setStatus('Ready', 'ok');
-}
-
-function conflictMap() {
-  const m = new Map();
-  for (const c of conflicts) {
-    for (const clsid of c.affectedClsids || []) {
-      const list = m.get(clsid) || [];
-      list.push(c);
-      m.set(clsid, list);
-    }
-  }
-  return m;
-}
-
-function render() {
-  const showAll = el('showAll').checked;
-  const rows = handlers.filter(r => showAll || r.thirdParty);
-  const cm = conflictMap();
-  el('summary').textContent = handlers.length + ' handlers, ' + handlers.filter(r => r.thirdParty).length + ' third-party, ' + handlers.filter(r => r.orphan).length + ' orphaned';
-  el('restartBtn').style.display = dirty ? '' : 'none';
-  el('rows').innerHTML = rows.map(r => {
-    const sigClass = r.orphan ? 'on' : r.trusted ? 'good' : r.sigStatus === 'Valid' ? 'warn' : 'on';
-    const notes = (cm.get(r.clsid) || []).map(c => '<div class="conflict">' + esc(c.severity) + ': ' + esc(c.note || c.id) + ' (' + esc(c.confidence) + ', ' + (c.definite ? 'definite' : 'unverified') + ') ' + link(c.source) + '</div>').join('');
-    const blocked = r.blocked ? '<span class="pill on">blocked</span>' : '<span class="pill">active</span>';
-    const action = r.blocked
-      ? '<button data-unblock="' + esc(r.clsid) + '"' + (admin ? '' : ' disabled') + '>Enable</button>'
-      : '<button data-block="' + esc(r.clsid) + '"' + (admin ? '' : ' disabled') + '>Disable</button>';
-    return '<tr><td class="pub">' + esc(r.pub) + '</td><td class="sig"><span class="pill ' + sigClass + '">' + esc(r.sigStatus) + '</span><div class="mono">' + esc(r.reason || '') + '</div></td><td class="blocked">' + blocked + '</td><td class="name">' + esc(r.name || r.label || r.clsid) + notes + '<div class="mono">' + esc(r.clsid) + '</div></td><td class="dll">' + esc(basename(r.dll) || (r.orphan ? 'MISSING' : '')) + '</td><td class="action">' + action + '</td></tr>';
-  }).join('');
-}
-
-function esc(s) {
-  return String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-}
-
-function link(url) {
-  if (!/^https?:\\/\\//.test(url || '')) return esc(url || '');
-  return '<a href="' + esc(url) + '" target="_blank" rel="noreferrer">source</a>';
-}
-
-document.addEventListener('click', async e => {
-  const block = e.target.getAttribute('data-block');
-  const unblock = e.target.getAttribute('data-unblock');
-  try {
-    if (block) {
-      const row = handlers.find(r => r.clsid === block);
-      await api('/api/block', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ clsid: block, name: row && (row.name || row.label) }) });
-      dirty = true; await load(); return;
-    }
-    if (unblock) {
-      await api('/api/unblock', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ clsid: unblock }) });
-      dirty = true; await load(); return;
-    }
-  } catch (err) { setStatus(err.message, 'error'); }
-});
-
-el('showAll').addEventListener('change', render);
-el('refresh').addEventListener('click', load);
-el('classicToggle').addEventListener('click', async () => {
-  try {
-    await api('/api/classic-menu', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ enabled: !classic }) });
-    dirty = true; await load();
-  } catch (err) { setStatus(err.message, 'error'); }
-});
-el('exportBtn').addEventListener('click', async () => {
-  try {
-    const out = await api('/api/export', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ file: el('filePath').value.trim() || undefined }) });
-    el('filePath').value = out.file;
-    setStatus('Exported ' + out.count + ' handlers', 'ok');
-  } catch (err) { setStatus(err.message, 'error'); }
-});
-el('importBtn').addEventListener('click', async () => {
-  try {
-    const file = el('filePath').value.trim();
-    if (!file) throw new Error('Choose a snapshot file');
-    const out = await api('/api/import', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ file }) });
-    dirty = dirty || out.blocked || out.unblocked;
-    await load();
-    setStatus('Imported: ' + out.blocked + ' blocked, ' + out.unblocked + ' unblocked', 'ok');
-  } catch (err) { setStatus(err.message, 'error'); }
-});
-el('restartBtn').addEventListener('click', async () => {
-  try {
-    await api('/api/restart-explorer', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-    dirty = false; render(); setStatus('Explorer restarted', 'ok');
-  } catch (err) { setStatus(err.message, 'error'); }
-});
-load().catch(err => setStatus(err.message, 'error'));
-</script>
-</body>
-</html>`;
+function relaunchGuiAsAdmin(port, scope) {
+  const executable = process.execPath;
+  const argumentsList = path.basename(executable).toLowerCase() === 'node.exe'
+    ? [__filename, 'gui', '--port', String(port), '--scope', scope]
+    : ['gui', '--port', String(port), '--scope', scope];
+  const script = `$argsList = @(${argumentsList.map(psQuote).join(',')}); Start-Process -Verb RunAs -FilePath ${psQuote(executable)} -ArgumentList $argsList -WindowStyle Hidden`;
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { stdio: 'ignore', env: powershellEnv() });
 }
 
 function startGui(args) {
@@ -774,13 +824,19 @@ function startGui(args) {
   const port = portIndex >= 0 ? parseInt(args[portIndex + 1], 10) : 7373;
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('valid --port required');
   const noOpen = args.includes('--no-open');
+  const scope = scanScope(args);
+  if (args.includes('--elevate') && !isAdmin()) {
+    relaunchGuiAsAdmin(port, scope);
+    console.log(grn('\n  requested administrator GUI launch.\n'));
+    return;
+  }
   const host = '127.0.0.1';
   const token = crypto.randomBytes(24).toString('hex');
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${host}:${port}`);
       if (url.pathname === '/' && req.method === 'GET') {
-        const html = guiHtml(token);
+        const html = renderGui(token);
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Length': Buffer.byteLength(html),
@@ -789,7 +845,12 @@ function startGui(args) {
         res.end(html);
         return;
       }
-      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname, token);
+      if (url.pathname === '/favicon.ico' && req.method === 'GET') {
+        res.writeHead(204, { 'Cache-Control': 'public, max-age=86400' });
+        res.end();
+        return;
+      }
+      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname, token, scope, port);
       sendJson(res, 404, { error: 'not found' });
     } catch (e) {
       sendJson(res, e.status || (e.body && e.body.needsAdmin ? 403 : 500), { error: e.message || String(e), needsAdmin: !!(e.body && e.body.needsAdmin) });
@@ -807,40 +868,58 @@ function startGui(args) {
 
 // --- main --------------------------------------------------------------------
 function fail(msg) { console.error(red('  error: ') + msg); process.exit(1); }
+function isSeaRuntime() {
+  try { return require('node:sea').isSea(); }
+  catch { return false; }
+}
 function main() {
   const args = process.argv.slice(2).filter(a => a !== '--no-color');
-  const cmd = args[0] || 'list';
+  const cmd = args[0] || (isSeaRuntime() ? 'gui' : 'list');
   const apply = args.includes('--apply');
   const showAll = args.includes('--all');
   const asJson = args.includes('--json');
+  const scope = scanScope(args);
 
   if (['-h', '--help', 'help'].includes(cmd)) {
-    console.log(fs.readFileSync(__filename, 'utf8').split('*/')[0].replace(/^[\s\S]*?usage:/, 'usage:'));
+    console.log(HELP);
     return;
   }
   if (cmd === 'blocked') return showBlocked();
   if (cmd === 'classic-menu') return classicMenu(args, apply);
   if (cmd === 'import') return importSnapshot(args[1], apply);
+  if (cmd === 'undo-last') return undoLast(apply);
+  if (cmd === 'diff') return diffCommand(args[1], args[2], asJson);
+  if (cmd === 'baseline') return baselineCommand(args);
+  if (cmd === 'audit') return auditCommand(args);
   if (cmd === 'gui' || cmd === 'serve') return startGui(args);
   if (cmd === 'conflicts') {
-    const rows = enumerate();
+    const rows = enumerate(scope);
     console.log(JSON.stringify(computeConflicts(rows), null, 2));
     return;
   }
 
   if (cmd === 'block' || cmd === 'unblock') {
     if (!args[1]) fail(`${cmd} needs a row number or {CLSID}`);
-    return block(args[1], apply, cmd === 'block');
+    return block(args[1], apply, cmd === 'block', args.includes('--restart-explorer'));
   }
   if (cmd === 'export') {
-    const snapshot = writeSnapshot(args[1]);
+    const snapshot = writeSnapshot(args[1], scope);
     console.log(grn(`\n  snapshot written: ${snapshot.file}  (${snapshot.rows.length} handlers)`));
     console.log(dim('  keep this. it is your one-file rollback record.\n'));
     return;
   }
   // default: list
-  const rows = enumerate();
+  const rows = enumerate(scope);
   if (asJson) { fs.writeFileSync(CACHE, JSON.stringify(rows)); console.log(JSON.stringify(rows, null, 2)); return; }
-  render(rows, showAll);
+  const filtered = filterRows(rows, { ...cliFilters(args, true), showMicrosoft: true });
+  render(filtered, showAll);
 }
-main();
+if (require.main === module) main();
+
+module.exports = {
+  PS,
+  computeConflicts,
+  enumerate,
+  importPlan,
+  powershellEnv,
+};

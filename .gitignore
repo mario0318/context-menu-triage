@@ -3,6 +3,13 @@ npm-debug.log*
 triage-log.json
 triage-cache.json
 triage-snapshot-*.json
+triage-auto-before-*.json
+dist/
+winget/
+.playwright-cli/
+output/
+*-smoke.json
+docs/*.webm
 *.tmp
 *.log
 .DS_Store

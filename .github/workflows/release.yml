@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Build and sign
+        shell: powershell
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: npm run build:exe
+      - name: Verify executable
+        shell: powershell
+        run: |
+          .\dist\context-menu-triage.exe audit --scope broad --quiet
+          Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256
+          $signature = Get-AuthenticodeSignature .\dist\context-menu-triage.exe
+          if ($signature.Status -ne 'Valid') { throw "Stable releases require a valid Authenticode signature. Status: $($signature.Status)" }
+      - name: Publish GitHub Release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $notes = "docs/release-notes-$version.md"
+          $args = @('release', 'create', $env:GITHUB_REF_NAME, 'dist/context-menu-triage.exe', 'dist/context-menu-triage.exe.sha256', 'dist/sbom.cdx.json', '--verify-tag', '--title', "Context Menu Triage $env:GITHUB_REF_NAME")
+          if (Test-Path -LiteralPath $notes) { $args += @('--notes-file', $notes) } else { $args += '--generate-notes' }
+          & gh @args
+          if ($LASTEXITCODE) { throw 'GitHub Release creation failed.' }

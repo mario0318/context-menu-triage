@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/mario0318/context-menu-triage/blob/main/docs/snapshot.schema.json",
+  "title": "Context Menu Triage snapshot",
+  "type": "object",
+  "required": ["schemaVersion", "createdAt", "machine", "handlers"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "machine": { "type": "object" },
+    "handlers": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/handler" }
+    }
+  },
+  "$defs": {
+    "registration": {
+      "type": "object",
+      "required": ["hive", "view", "parent", "key", "label"],
+      "properties": {
+        "hive": { "enum": ["HKLM", "HKCU"] },
+        "view": { "enum": ["64", "32"] },
+        "parent": { "type": "string" },
+        "key": { "type": "string" },
+        "label": { "type": "string" }
+      }
+    },
+    "handler": {
+      "type": "object",
+      "required": ["clsid", "sigStatus", "registrations", "blocked", "comState", "thirdParty", "reason"],
+      "properties": {
+        "clsid": { "type": "string", "pattern": "^\\{[0-9A-Fa-f-]{36}\\}$" },
+        "label": { "type": ["string", "null"] },
+        "name": { "type": ["string", "null"] },
+        "dll": { "type": ["string", "null"] },
+        "exists": { "type": "boolean" },
+        "sigStatus": { "type": "string" },
+        "signer": { "type": ["string", "null"] },
+        "surfaces": { "type": "array", "items": { "type": "string" } },
+        "registrations": { "type": "array", "items": { "$ref": "#/$defs/registration" } },
+        "blocked": { "type": "boolean" },
+        "comState": { "enum": ["missing-clsid", "missing-inproc", "missing-dll", "present"] },
+        "writableMissingPath": { "type": "boolean" },
+        "trusted": { "type": "boolean" },
+        "microsoftTrusted": { "type": "boolean" },
+        "thirdParty": { "type": "boolean" },
+        "orphan": { "type": "boolean" },
+        "pub": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

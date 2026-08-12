@@ -1,0 +1,7 @@
+{
+  "main": "dist/triage.cjs",
+  "output": "dist/triage.blob",
+  "disableExperimentalSEAWarning": true,
+  "useSnapshot": false,
+  "useCodeCache": false
+}

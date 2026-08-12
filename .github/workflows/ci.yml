@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run test:windows
+
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build:exe -- --SkipSign
+      - run: .\dist\context-menu-triage.exe audit --scope broad --quiet
+      - uses: actions/upload-artifact@v4
+        with:
+          name: context-menu-triage-windows-x64
+          path: |
+            dist/context-menu-triage.exe
+            dist/context-menu-triage.exe.sha256
+            dist/sbom.cdx.json

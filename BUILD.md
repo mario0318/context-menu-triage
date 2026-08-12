@@ -147,9 +147,6 @@ as UNSIGNED third party, because catalog signed OS files often expose no signer 
 - Microsoft is also matched by a Valid Authenticode signature whose signer is Microsoft.
 - bare DLL filenames (no path) resolve against System32 then SysWOW64 before the existence check,
   so system handlers are never mislabeled ORPHAN.
-- Node must spawn Windows PowerShell with a Windows PowerShell-only `PSModulePath`; inherited
-  PowerShell 7 module paths can break `Microsoft.PowerShell.Security` and silently erase signature
-  data if errors are suppressed.
 - every row carries a `reason` field (system path / ms-signed / signed / no signature / dll missing).
 
 do not regress this. do not switch classification back to signature-only. verify against section 9.
@@ -173,6 +170,9 @@ behavior: read the snapshot, compute the diff against current live state (which 
 blocked in the snapshot but not now, and vice versa), print the plan, and on `--apply` bring
 the block list to match the snapshot's `blocked` flags. dry run prints every add/delete it
 would run. this is the one file rollback. it must be idempotent (re-running changes nothing).
+Only reconcile CLSIDs present in the snapshot. the HKLM Shell Extensions `Blocked` key can contain
+non-context-menu shell extensions managed by Windows or other tools; importing a triage snapshot
+must never delete those unrelated values.
 
 ### 6.3 local HTTP GUI (thu)
 a single Node `http` server that serves one self contained HTML page and a small JSON API.
@@ -285,6 +285,11 @@ rules:
    record; keep it accurate.
 8. Windows system-path DLLs and Microsoft-signed valid handlers are hidden by default and never
    suggested for blocking. classification is path first (see 6.0), not signature only.
+9. every `powershell` spawn MUST force a Windows PowerShell only `PSModulePath` in its environment.
+   never spawn `powershell` inheriting the parent process env. see gotcha in section 10. this is
+   load bearing: without it `Get-AuthenticodeSignature` silently fails to load and all signature
+   data is erased with no error. applies to the enumerator, the GUI server, and any batched
+   signature pass added later.
 
 ---
 
@@ -303,6 +308,8 @@ rules:
 - [ ] GUI shows the admin banner when unelevated and blocks apply with a 403, classic toggle still works
 - [ ] conflict warnings show source + confidence; clsid matches marked definite, name matches marked unverified; no unsourced entries exist in known-conflicts.json
 - [ ] restart Explorer button works and is never triggered automatically
+- [ ] Windows Defender and OneDrive classify as Microsoft, signature branch intact (proves the
+      Windows PowerShell PSModulePath guard survived any spawn changes, incl. GUI and batched passes)
 - [ ] zero runtime npm dependencies (or one justified pure JS dep, documented)
 - [ ] README with a before/after framing and the admin requirement stated
 
@@ -310,6 +317,16 @@ rules:
 
 ## 10. known gotchas
 
+- POWERSHELL ENV, READ FIRST. spawning `powershell.exe` (Windows PowerShell 5.1) from Node while
+  the parent env carries PowerShell 7's `PSModulePath` makes 5.1 resolve modules against 7's tree,
+  fail to load its own bundled `Microsoft.PowerShell.Security`, and therefore never load
+  `Get-AuthenticodeSignature`. combined with `$ErrorActionPreference = 'SilentlyContinue'` this fails
+  with zero output and every signer comes back null, silently erasing all signature classification.
+  fix, already applied: every spawn sets a Windows PowerShell only `PSModulePath` in the child env
+  (System32 WindowsPowerShell modules only), e.g. `%SystemRoot%\System32\WindowsPowerShell\v1.0\Modules`.
+  this is invisible and load bearing. any new spawn (GUI server, batched signature pass) that omits it
+  reintroduces the bug. the only test that catches a regression: confirm Windows Defender and OneDrive
+  still classify as Microsoft. add that check whenever you touch spawn logic.
 - `Get-AuthenticodeSignature` runs once per handler. on machines with 100+ handlers the first
   enumerate can take a few seconds. if it drags, batch the signature checks in one PowerShell
   pass rather than resolving per CLSID. do not switch strategies unless it actually drags.

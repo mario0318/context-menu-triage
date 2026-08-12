@@ -1,0 +1,22 @@
+{
+  "name": "context-menu-triage",
+  "version": "0.1.0",
+  "description": "Inspect and reversibly block Windows Explorer context menu handlers.",
+  "main": "triage.js",
+  "bin": {
+    "context-menu-triage": "./triage.js"
+  },
+  "scripts": {
+    "check": "node --check triage.js",
+    "list": "node triage.js"
+  },
+  "keywords": [
+    "windows",
+    "explorer",
+    "context-menu",
+    "shell-extension"
+  ],
+  "author": "mario0318",
+  "license": "UNLICENSED",
+  "private": true
+}

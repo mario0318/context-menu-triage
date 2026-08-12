@@ -1,0 +1,9 @@
+node_modules/
+npm-debug.log*
+triage-log.json
+triage-cache.json
+triage-snapshot-*.json
+*.tmp
+*.log
+.DS_Store
+Thumbs.db

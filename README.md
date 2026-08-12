@@ -84,7 +84,7 @@ PowerShell still performs registry and Authenticode work underneath the Node int
 
 ## Compatibility
 
-Automated source and live-registry tests run on Windows with Node 20, 22, and 24 in GitHub Actions. Manual development testing has covered Windows 11 25H2. Please include the Windows build, architecture, and command output in compatibility reports.
+Automated source and live-registry tests run on Windows with Node 20, 22, and 24 in GitHub Actions. The live guard verifies a catalog-valid Windows `shell32.dll` handler, so a broken PowerShell signature-module environment fails CI. Manual development testing has covered Windows 11 25H2. Please include the Windows build, architecture, and command output in compatibility reports.
 
 The read and dry-run surfaces are covered by automated tests. A controlled live HKLM block/unblock/import cycle should still be performed for each release candidate on a disposable third-party handler before calling the write path certified.
 

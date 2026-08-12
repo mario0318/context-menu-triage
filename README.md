@@ -1,5 +1,8 @@
 # Context Menu Triage
 
+[![CI](https://github.com/mario0318/context-menu-triage/actions/workflows/ci.yml/badge.svg)](https://github.com/mario0318/context-menu-triage/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-2f855a.svg)](LICENSE)
+
 Inspect legacy Windows Explorer context menu handlers, verify where they came from, find stale COM registrations, and block selected handlers reversibly.
 
 Context Menu Triage separates the evidence that matters: HKLM versus HKCU registration, 64-bit versus 32-bit registry view, COM server state, resolved DLL path, Authenticode chain status, signer, and every file-association surface that references a CLSID. It does not claim to inspect the primary Windows 11 menu, which is built around `IExplorerCommand`; legacy `IContextMenu` handlers normally appear under **Show more options** or Shift+F10.
@@ -10,7 +13,7 @@ Context Menu Triage separates the evidence that matters: HKLM versus HKCU regist
 
 ## Install
 
-Download `context-menu-triage.exe` from [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases). The executable contains the GUI and CLI and has no runtime dependencies. Double-click it for the GUI.
+Stable binaries will be published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases) after the Authenticode signing gate is configured. The executable contains the GUI and CLI and has no runtime dependencies; double-clicking it opens the GUI. CI currently publishes an unsigned test artifact for maintainers, not a stable end-user release.
 
 From source, install Node.js 20 or newer and run:
 

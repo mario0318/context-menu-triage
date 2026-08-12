@@ -38,6 +38,8 @@ The local GUI serves on `http://127.0.0.1:7373/` by default:
 node triage.js gui --port 7373
 ```
 
+The server prints a launch-specific URL with a token. Use that URL for the GUI; `/api/*` calls without the token are rejected.
+
 After applying a block, unblock, import, or classic menu change, restart Explorer for the shell to pick up the change:
 
 ```powershell
@@ -54,6 +56,7 @@ start explorer
 - `HKCR\CLSID` is never modified.
 - Applied mutations are appended to `triage-log.json`.
 - `known-conflicts.json` starts empty unless entries have real sources. Name-only matches are advisory and unverified.
+- The localhost GUI API requires a random launch token, including when the server is elevated.
 
 ## Notes
 

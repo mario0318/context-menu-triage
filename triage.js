@@ -28,6 +28,7 @@
 
 'use strict';
 const { execFileSync } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
@@ -501,7 +502,13 @@ function adminRequired(res) {
   return true;
 }
 
-async function handleApi(req, res, route) {
+function apiTokenValid(req, token) {
+  const url = new URL(req.url, 'http://127.0.0.1');
+  return req.headers['x-triage-token'] === token || url.searchParams.get('t') === token;
+}
+
+async function handleApi(req, res, route, token) {
+  if (!apiTokenValid(req, token)) return sendJson(res, 403, { error: 'Invalid or missing API token.' });
   if (req.method === 'GET' && route === '/api/handlers') return sendJson(res, 200, enumerate());
   if (req.method === 'GET' && route === '/api/blocked') return sendJson(res, 200, [...getBlockedClsids()]);
   if (req.method === 'GET' && route === '/api/classic-menu') return sendJson(res, 200, { enabled: classicMenuEnabled() });
@@ -545,7 +552,7 @@ async function handleApi(req, res, route) {
   sendJson(res, 404, { error: 'not found' });
 }
 
-function guiHtml() {
+function guiHtml(token) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -633,6 +640,7 @@ tr:last-child td { border-bottom: 0; }
   </div>
 </main>
 <script>
+const apiToken = ${JSON.stringify(token)};
 let handlers = [];
 let conflicts = [];
 let admin = false;
@@ -644,6 +652,8 @@ const basename = p => p ? p.split(/[\\\\/]/).pop() : '';
 const setStatus = (msg, kind) => { const s = el('status'); s.textContent = msg || ''; s.className = 'status ' + (kind || ''); };
 
 async function api(path, options) {
+  options = options || {};
+  options.headers = Object.assign({}, options.headers || {}, { 'X-Triage-Token': apiToken });
   const res = await fetch(path, options);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -765,11 +775,12 @@ function startGui(args) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('valid --port required');
   const noOpen = args.includes('--no-open');
   const host = '127.0.0.1';
+  const token = crypto.randomBytes(24).toString('hex');
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, `http://${host}:${port}`);
       if (url.pathname === '/' && req.method === 'GET') {
-        const html = guiHtml();
+        const html = guiHtml(token);
         res.writeHead(200, {
           'Content-Type': 'text/html; charset=utf-8',
           'Content-Length': Buffer.byteLength(html),
@@ -778,14 +789,14 @@ function startGui(args) {
         res.end(html);
         return;
       }
-      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname);
+      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname, token);
       sendJson(res, 404, { error: 'not found' });
     } catch (e) {
       sendJson(res, e.status || (e.body && e.body.needsAdmin ? 403 : 500), { error: e.message || String(e), needsAdmin: !!(e.body && e.body.needsAdmin) });
     }
   });
   server.listen(port, host, () => {
-    const url = `http://${host}:${port}/`;
+    const url = `http://${host}:${port}/?t=${token}`;
     console.log(grn(`\n  GUI listening: ${url}`));
     console.log(dim('  press Ctrl+C to stop.\n'));
     if (!noOpen) {

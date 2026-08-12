@@ -198,6 +198,10 @@ the server is not elevated. the page shows a persistent banner in that case tell
 to relaunch the terminal as administrator. the classic menu toggle does NOT need admin, keep
 it usable even in the non admin state.
 
+The GUI must mint a random token at server launch, print it in the local URL, and require that
+token on every `/api/*` call. Elevated localhost write endpoints must not be callable by arbitrary
+web pages through plain forms or no-cors requests.
+
 the page must:
 - render the handler table with columns: publisher, signature status, blocked state, name, DLL basename
 - default to hiding Microsoft handlers, with a "show all" toggle
@@ -290,6 +294,9 @@ rules:
    load bearing: without it `Get-AuthenticodeSignature` silently fails to load and all signature
    data is erased with no error. applies to the enumerator, the GUI server, and any batched
    signature pass added later.
+10. localhost GUI API calls must be token guarded before elevated use. print a launch-scoped random
+    token in the `127.0.0.1` URL and reject `/api/*` calls that do not present it. no elevated GUI
+    write endpoint may be reachable by cross-site forms or no-cors fetches from unrelated pages.
 
 ---
 
@@ -308,6 +315,7 @@ rules:
 - [ ] GUI shows the admin banner when unelevated and blocks apply with a 403, classic toggle still works
 - [ ] conflict warnings show source + confidence; clsid matches marked definite, name matches marked unverified; no unsourced entries exist in known-conflicts.json
 - [ ] restart Explorer button works and is never triggered automatically
+- [ ] GUI API rejects requests missing the launch token, including admin-gated write endpoints
 - [ ] Windows Defender and OneDrive classify as Microsoft, signature branch intact (proves the
       Windows PowerShell PSModulePath guard survived any spawn changes, incl. GUI and batched passes)
 - [ ] zero runtime npm dependencies (or one justified pure JS dep, documented)

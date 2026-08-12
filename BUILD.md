@@ -136,7 +136,25 @@ the GUI must offer a "restart Explorer" action. never restart Explorer without t
 
 ## 6. build tasks
 
-### 6.1 classic menu toggle (CLI first, wed)
+do them in this order. do not start the GUI until the CLI surface is reliable.
+
+### 6.0 publisher/trust classification (already fixed in triage.js, preserve it)
+the first scaffold misclassified Windows system DLLs (shell32.dll, ntshrui.dll, appresolver.dll)
+as UNSIGNED third party, because catalog signed OS files often expose no signer certificate through
+`Get-AuthenticodeSignature`. the corrected `triage.js` classifies path first:
+- a DLL resolved under `%SystemRoot%` (System32 / SysWOW64 / WinSxS) is Windows/system: hidden by
+  default, never suggested for blocking, UNLESS it is validly signed by a non Microsoft party.
+- Microsoft is also matched by a Valid Authenticode signature whose signer is Microsoft.
+- bare DLL filenames (no path) resolve against System32 then SysWOW64 before the existence check,
+  so system handlers are never mislabeled ORPHAN.
+- Node must spawn Windows PowerShell with a Windows PowerShell-only `PSModulePath`; inherited
+  PowerShell 7 module paths can break `Microsoft.PowerShell.Security` and silently erase signature
+  data if errors are suppressed.
+- every row carries a `reason` field (system path / ms-signed / signed / no signature / dll missing).
+
+do not regress this. do not switch classification back to signature-only. verify against section 9.
+
+### 6.1 classic menu toggle (CLI, next)
 add two CLI subcommands using section 5.3, dry run default, `--apply` to commit. no admin
 needed. add a `--restart-explorer` flag that runs section 5.4 after apply.
 ```
@@ -217,24 +235,38 @@ no telemetry, no network calls off localhost, no analytics. everything stays on 
 }
 ```
 
-### 7.2 known-conflicts.json (you create and seed this)
-a curated file shipped alongside `triage.js`. this is the entire conflict detection strategy.
-no process analysis, just this list.
+### 7.2 known-conflicts.json (conservative, source backed)
+a curated file shipped alongside `triage.js`. registry enumeration plus this list is the entire
+conflict detection strategy. no process analysis. the risk here is fake precision (guessed CLSIDs
+that look authoritative), so the rules below are non negotiable.
+
+schema:
 ```json
 [
   {
-    "clsids": ["{...}", "{...}"],
-    "names": ["Nilesoft Shell", "some Windhawk shell mod"],
+    "id": "nilesoft-vs-shell-styling-mods",
+    "match": "clsid",
+    "clsids": ["{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}"],
+    "names": ["Nilesoft Shell"],
     "severity": "high | medium | low",
-    "note": "both replace the shell context menu host; icon overlays break"
+    "confidence": "confirmed | reported | suspected",
+    "source": "https://github.com/.../issues/1234",
+    "note": "human readable description of the conflict"
   }
 ]
 ```
-match logic: a conflict fires when 2 or more CLSIDs from one entry are present and not blocked.
-seed it with at least 10 real entries mined from GitHub issues (search: Windhawk + Nilesoft
-conflicts, Explorer context menu handler conflicts, known slow handlers from GPU/cloud suites).
-where you cannot confirm a CLSID, record the handler name and leave the CLSID array partial
-with a `"note"` flagging it as name matched only. never invent a CLSID.
+rules:
+- every entry MUST carry a real `source` (a URL, or `observed:<machine>/<date>` for something the
+  author reproduced first hand). no source, no entry.
+- NEVER invent or guess a CLSID. if the source does not give you a verifiable CLSID, set
+  `"match": "name"`, leave `clsids` empty, and match on name only.
+- `match: "clsid"` fires only when 2 or more listed CLSIDs are present and unblocked. this is the
+  only definite warning.
+- `match: "name"` fires on a handler name/label substring. it is advisory only: render it as
+  "possible conflict, unverified," and never auto suggest a block from a name match.
+- ship the file with 0 to 2 fully sourced examples, not 10 padded ones. an empty honest file beats
+  a full fabricated one. the author grows it from real data.
+- the CLI/GUI must display `source` and `confidence` next to every conflict warning.
 
 ---
 
@@ -251,14 +283,17 @@ with a `"note"` flagging it as name matched only. never invent a CLSID.
 6. no network egress except the localhost HTTP server. no npm installs at runtime.
 7. append every applied mutation to `triage-log.json`. the export snapshot is the rollback of
    record; keep it accurate.
-8. Microsoft signed valid handlers are shown but never suggested for blocking by default.
+8. Windows system-path DLLs and Microsoft-signed valid handlers are hidden by default and never
+   suggested for blocking. classification is path first (see 6.0), not signature only.
 
 ---
 
 ## 9. acceptance checklist (Friday done means all green)
 
 - [ ] `node triage.js` lists third party handlers, orphans and unsigned on top, Microsoft hidden
-- [ ] `list --all` shows Microsoft too, `--json` emits the full array
+- [ ] shell32.dll, ntshrui.dll, appresolver.dll and other System32 handlers classify as Windows/
+      system and are hidden by default (never UNSIGNED, never third party)
+- [ ] `list --all` shows Microsoft too, `--json` emits the full array including `reason`
 - [ ] `block <n>` dry runs, `block <n> --apply` (admin) adds to the Blocked list, verified in regedit
 - [ ] `unblock <n> --apply` removes it, right click menu returns to prior state after Explorer restart
 - [ ] `classic-menu on --apply` gives the full Win11 classic menu, `off` reverts, no admin needed
@@ -266,7 +301,7 @@ with a `"note"` flagging it as name matched only. never invent a CLSID.
 - [ ] blocking a real handler (e.g. a cloud sync or GPU suite entry) visibly removes its menu item
 - [ ] GUI serves on 127.0.0.1, lists handlers, per row disable works, Microsoft hidden by default
 - [ ] GUI shows the admin banner when unelevated and blocks apply with a 403, classic toggle still works
-- [ ] conflict warnings render on affected rows from known-conflicts.json (seed a test conflict to prove it)
+- [ ] conflict warnings show source + confidence; clsid matches marked definite, name matches marked unverified; no unsourced entries exist in known-conflicts.json
 - [ ] restart Explorer button works and is never triggered automatically
 - [ ] zero runtime npm dependencies (or one justified pure JS dep, documented)
 - [ ] README with a before/after framing and the admin requirement stated

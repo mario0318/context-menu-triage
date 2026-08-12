@@ -40,6 +40,7 @@ const dim = s => c('2', s), red = s => c('31', s), grn = s => c('32', s),
 // --- powershell enumeration (encoded to dodge all quoting) --------------------
 const PS = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'
 function Resolve-Clsid($clsid) {
   $paths = @("Registry::HKEY_CLASSES_ROOT\CLSID\$clsid","Registry::HKEY_CLASSES_ROOT\WOW6432Node\CLSID\$clsid")
   foreach ($cp in $paths) {
@@ -80,19 +81,31 @@ foreach ($p in $parents) {
     if ($map.ContainsKey($clsid)) { $map[$clsid].surfaces += $surface; continue }
     $r = Resolve-Clsid $clsid
     $dll = $r.dll
-    if ($dll) { $dll = [Environment]::ExpandEnvironmentVariables($dll).Trim('"') }
-    $exists = $false; $status = 'None'; $signer = $null
-    if ($dll -and (Test-Path -LiteralPath $dll -ErrorAction SilentlyContinue)) {
-      $exists = $true
-      $sig = Get-AuthenticodeSignature -LiteralPath $dll -ErrorAction SilentlyContinue
-      if ($sig) {
-        $status = $sig.Status.ToString()
-        if ($sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }
+    if ($dll) {
+      $dll = [Environment]::ExpandEnvironmentVariables($dll).Trim('"')
+      if ($dll -and -not ($dll -match '[\\/]')) {
+        foreach ($base in @(($env:SystemRoot + '\System32'), ($env:SystemRoot + '\SysWOW64'))) {
+          $cand = Join-Path $base $dll
+          if (Test-Path -LiteralPath $cand -ErrorAction SilentlyContinue) { $dll = $cand; break }
+        }
+      }
+    }
+    $exists = $false; $status = 'None'; $signer = $null; $underWin = $false
+    if ($dll) {
+      $wr = ('' + $env:SystemRoot).ToLower()
+      if ($wr -and $dll.ToLower().StartsWith($wr)) { $underWin = $true }
+      if (Test-Path -LiteralPath $dll -ErrorAction SilentlyContinue) {
+        $exists = $true
+        $sig = Get-AuthenticodeSignature -LiteralPath $dll -ErrorAction SilentlyContinue
+        if ($null -ne $sig) {
+          $status = $sig.Status.ToString()
+          if ($null -ne $sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }
+        }
       }
     }
     $map[$clsid] = [pscustomobject]@{
       clsid = $clsid; label = ('' + $k.PSChildName); name = $r.name; dll = $dll
-      exists = $exists; sigStatus = $status; signer = $signer
+      exists = $exists; sigStatus = $status; signer = $signer; underWindows = $underWin
       surfaces = @($surface); blocked = [bool]$blocked[$clsid]
     }
   }
@@ -106,7 +119,7 @@ function enumerate() {
   try {
     raw = execFileSync('powershell',
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64],
-      { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' });
+      { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', env: powershellEnv() });
   } catch (e) {
     fail('powershell enumeration failed: ' + (e.message || e));
   }
@@ -115,16 +128,39 @@ function enumerate() {
   return data.map(cook).sort(sortRows);
 }
 
+function powershellEnv() {
+  const env = { ...process.env };
+  const systemRoot = env.SystemRoot || 'C:\\Windows';
+  const programFiles = env.ProgramFiles || 'C:\\Program Files';
+  env.PSModulePath = [
+    path.join(programFiles, 'WindowsPowerShell\\Modules'),
+    path.join(systemRoot, 'system32\\WindowsPowerShell\\v1.0\\Modules'),
+  ].join(';');
+  return env;
+}
+
 function cook(x) {
   const signer = x.signer || '';
-  const isMs = /Microsoft (Corporation|Windows)/i.test(signer);
-  const cnMatch = signer.match(/CN=([^,]+)/);
-  let pub = isMs ? 'Microsoft'
-          : !x.exists ? 'ORPHAN'
-          : cnMatch ? cnMatch[1].trim()
-          : 'UNSIGNED';
-  const trusted = isMs && x.sigStatus === 'Valid';
-  return { ...x, isMs, trusted, pub, thirdParty: !isMs, orphan: !x.exists };
+  const cn = (signer.match(/CN=([^,]+)/) || [])[1];
+  const msSigner = /Microsoft (Corporation|Windows)/i.test(signer);
+  const validSig = x.sigStatus === 'Valid';
+  const inWin = x.underWindows === true;
+  // path first: a DLL under %SystemRoot% is Windows/system UNLESS it is validly
+  // signed by a non-Microsoft party (rare third party masquerading in system dirs).
+  // this is the robust signal: catalog-signed OS files often expose no signer cert
+  // via Get-AuthenticodeSignature, so we do not rely on the signature alone.
+  const isSystem = inWin && !(validSig && signer && !msSigner);
+  const isMs = isSystem || (validSig && msSigner);
+  const orphan = !x.exists;
+  let pub, reason;
+  if (isSystem)            { pub = 'Windows';   reason = 'system path'; }
+  else if (isMs)           { pub = 'Microsoft'; reason = 'ms-signed'; }
+  else if (orphan)         { pub = 'ORPHAN';    reason = 'dll missing'; }
+  else if (validSig && cn) { pub = cn.trim();   reason = 'signed'; }
+  else if (cn)             { pub = cn.trim();   reason = 'sig:' + x.sigStatus; }
+  else                     { pub = 'UNSIGNED';  reason = 'no signature'; }
+  const trusted = isMs;
+  return { ...x, isMs, isSystem, trusted, pub, reason, thirdParty: !isMs, orphan };
 }
 function sortRows(a, b) {
   // orphans first, then unsigned/third-party, microsoft last

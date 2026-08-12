@@ -6,10 +6,12 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   release:
     runs-on: windows-latest
+    environment: release
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -17,19 +19,36 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
-      - name: Build and sign
+      - name: Build executable
         shell: powershell
-        env:
-          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: npm run build:exe
+        run: npm run build:exe -- --SkipSign
+      - name: Azure login
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign executable with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\context-menu-triage.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Context Menu Triage
+          description-url: https://github.com/mario0318/context-menu-triage
       - name: Verify executable
         shell: powershell
         run: |
           .\dist\context-menu-triage.exe audit --scope broad --quiet
-          Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256
           $signature = Get-AuthenticodeSignature .\dist\context-menu-triage.exe
           if ($signature.Status -ne 'Valid') { throw "Stable releases require a valid Authenticode signature. Status: $($signature.Status)" }
+          $hash = (Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content .\dist\context-menu-triage.exe.sha256 "$hash  context-menu-triage.exe" -Encoding ASCII
+          Write-Output "Signed SHA256: $hash"
       - name: Publish GitHub Release
         shell: powershell
         env:

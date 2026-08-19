@@ -15,4 +15,4 @@ Highlights:
 
 Windows 11 note: this inventories legacy `IContextMenu` handlers shown under **Show more options** or Shift+F10. It does not enumerate the primary `IExplorerCommand` menu.
 
-Stable executable releases require a valid Authenticode signature.
+Signing note: this is an **unsigned interim release** published while the SignPath Foundation open-source signing application is pending. Windows SmartScreen may warn about an unknown publisher. Verify the download with the published `context-menu-triage.exe.sha256` checksum. A future release will carry a valid Authenticode signature, after which signed releases become the stable default.

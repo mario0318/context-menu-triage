@@ -13,7 +13,7 @@ Context Menu Triage separates the evidence that matters: HKLM versus HKCU regist
 
 ## Install
 
-Stable binaries will be published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases) after the SignPath Foundation application and Authenticode signing gate are complete. The executable contains the GUI and CLI and has no runtime dependencies; double-clicking it opens the GUI. CI currently publishes an unsigned test artifact for maintainers, not a stable end-user release.
+Binaries are published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases). The current release is an **unsigned interim build**: the SignPath Foundation open-source signing application is still pending, so Windows SmartScreen may warn about an unknown publisher until Authenticode signing is active. Verify each download against its published `context-menu-triage.exe.sha256` checksum. The executable contains the GUI and CLI and has no runtime dependencies; double-clicking it opens the GUI.
 
 From source, install Node.js 20 or newer and run:
 

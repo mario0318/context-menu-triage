@@ -4,6 +4,8 @@ Context Menu Triage is applying for the SignPath Foundation open-source code-sig
 
 Unsigned development artifacts are labeled as such and are not stable releases. A stable release must be built from a version tag by the public GitHub Actions workflow, submitted to SignPath from that workflow, manually approved, timestamped, and verified as a valid Authenticode signature before GitHub publishes it.
 
+Interim releases: until SignPath Foundation accepts the project and provisions signing, tagged releases are published as clearly labeled **unsigned interim builds** ("unsigned interim" in the release title) by the same public workflow, each with a SHA-256 checksum and CycloneDX SBOM. Once SignPath is configured, the workflow automatically switches to the signed path above and signed releases become the stable default.
+
 ## Team Roles
 
 - Committer and reviewer: [mario0318](https://github.com/mario0318)

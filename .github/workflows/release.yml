@@ -39,7 +39,20 @@ jobs:
           name: context-menu-triage-unsigned
           path: dist/context-menu-triage.exe
           if-no-files-found: error
+      - name: Determine signing mode
+        id: mode
+        shell: powershell
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_ORGANIZATION_ID)) {
+            Write-Warning 'SignPath is not configured; publishing an UNSIGNED interim release.'
+            "signing=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            "signing=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
       - name: Submit SignPath signing request
+        if: steps.mode.outputs.signing == 'true'
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -50,7 +63,8 @@ jobs:
           github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
           wait-for-completion: true
           output-artifact-directory: ${{ github.workspace }}\dist\signed
-      - name: Verify executable
+      - name: Verify signed executable
+        if: steps.mode.outputs.signing == 'true'
         shell: powershell
         run: |
           $signed = Get-ChildItem .\dist\signed -Filter context-menu-triage.exe -File -Recurse
@@ -62,14 +76,25 @@ jobs:
           $hash = (Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content .\dist\context-menu-triage.exe.sha256 "$hash  context-menu-triage.exe" -Encoding ASCII
           Write-Output "Signed SHA256: $hash"
+      - name: Verify unsigned executable
+        if: steps.mode.outputs.signing == 'false'
+        shell: powershell
+        run: |
+          .\dist\context-menu-triage.exe audit --scope broad --quiet
+          $hash = (Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content .\dist\context-menu-triage.exe.sha256 "$hash  context-menu-triage.exe" -Encoding ASCII
+          Write-Output "Unsigned SHA256: $hash"
       - name: Publish GitHub Release
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
+          SIGNING: ${{ steps.mode.outputs.signing }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $signed = $env:SIGNING -eq 'true'
+          $title = if ($signed) { "Context Menu Triage $env:GITHUB_REF_NAME" } else { "Context Menu Triage $env:GITHUB_REF_NAME (unsigned interim)" }
           $notes = "docs/release-notes-$version.md"
-          $args = @('release', 'create', $env:GITHUB_REF_NAME, 'dist/context-menu-triage.exe', 'dist/context-menu-triage.exe.sha256', 'dist/sbom.cdx.json', '--verify-tag', '--title', "Context Menu Triage $env:GITHUB_REF_NAME")
+          $args = @('release', 'create', $env:GITHUB_REF_NAME, 'dist/context-menu-triage.exe', 'dist/context-menu-triage.exe.sha256', 'dist/sbom.cdx.json', '--verify-tag', '--title', $title)
           if (Test-Path -LiteralPath $notes) { $args += @('--notes-file', $notes) } else { $args += '--generate-notes' }
           & gh @args
           if ($LASTEXITCODE) { throw 'GitHub Release creation failed.' }

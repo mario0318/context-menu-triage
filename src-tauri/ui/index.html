@@ -13,12 +13,8 @@
   }
   @media (prefers-color-scheme: dark) { body { color:#9fabad; background:#0e1213; } }
   .wrap { display:flex; flex-direction:column; align-items:center; gap:16px; }
-  .logo {
-    width:52px; height:52px; border-radius:14px; display:grid; place-items:center;
-    background:linear-gradient(160deg,#3b74f5,#1b4fd0);
-    box-shadow:0 6px 18px rgba(37,99,235,.4);
-  }
-  .logo svg { width:28px; height:28px; color:#fff; }
+  .logo { width:76px; height:76px; }
+  .logo svg { width:100%; height:100%; display:block; border-radius:19px; box-shadow:0 6px 18px rgba(37,99,235,.4); }
   .name { font-family:Bahnschrift,"Segoe UI",sans-serif; font-size:16px; letter-spacing:.3px; color:inherit; }
   .spin { width:22px; height:22px; border-radius:50%; border:2.5px solid rgba(128,128,128,.25); border-top-color:#2563eb; animation:s .7s linear infinite; }
   @keyframes s { to { transform:rotate(360deg); } }
@@ -27,7 +23,7 @@
 <body>
   <div class="wrap">
     <div class="logo">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+      <svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="ctg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2f6bed"/><stop offset="1" stop-color="#1b4fd0"/></linearGradient></defs><rect x="92" y="92" width="840" height="840" rx="210" fill="url(#ctg)"/><path d="M452 430 532 512 690 336" fill="none" stroke="#fff" stroke-width="80" stroke-linecap="round" stroke-linejoin="round"/><path d="M492 600 648 756 M648 600 492 756" stroke="#fff" stroke-width="68" stroke-linecap="round" opacity=".92"/><polygon points="232,250 232,556 320,487 385,625 446,599 381,466 473,403" fill="#fff" stroke="#0c224e" stroke-width="26" stroke-linejoin="round" paint-order="stroke"/></svg>
     </div>
     <div class="name">Context Menu Triage</div>
     <div class="spin"></div>

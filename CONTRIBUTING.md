@@ -1,5 +1,7 @@
 # Contributing
 
+Parts of this project are built with AI assistance (Claude Code and Codex). All changes are reviewed, tested, and owned by the maintainer.
+
 Issues and focused pull requests are welcome. For scanner changes, include the exact registry path, hive, registry view, Windows build, and a redacted JSON sample. Do not add guessed CLSIDs or unsourced conflict records.
 
 Before submitting a change:

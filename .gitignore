@@ -6,6 +6,10 @@ triage-snapshot-*.json
 triage-auto-before-*.json
 dist/
 winget/
+# Tauri build artifacts and the copied sidecar binary
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/
 .playwright-cli/
 output/
 *-smoke.json

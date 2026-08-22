@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Core window access; the Rust layer spawns the bundled scanner sidecar directly.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

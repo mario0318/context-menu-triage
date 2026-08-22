@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: write
-  actions: read
 
 jobs:
   release:
@@ -18,83 +17,52 @@ jobs:
         with:
           node-version: 24
           cache: npm
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - run: npm ci
-      - name: Build executable
-        shell: powershell
-        run: npm run build:exe -- --SkipSign
-      - name: Validate release version
+      - name: Validate version matches tag
         shell: powershell
         run: |
-          $packageVersion = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $tagVersion = $env:GITHUB_REF_NAME.TrimStart('v')
-          if ($packageVersion -ne $tagVersion) { throw "Tag $env:GITHUB_REF_NAME does not match package version $packageVersion" }
-          $info = (Get-Item .\dist\context-menu-triage.exe).VersionInfo
+          $tag = $env:GITHUB_REF_NAME.TrimStart('v')
+          $pkg = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($pkg -ne $tag) { throw "package.json version $pkg does not match tag $tag" }
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($conf -ne $tag) { throw "tauri.conf.json version $conf does not match tag $tag" }
+      - name: Build native app and installer
+        shell: powershell
+        run: npm run app:build
+      - name: Collect release assets
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          $setup = Get-ChildItem "src-tauri/target/release/bundle/nsis/*_x64-setup.exe" | Select-Object -First 1
+          if (-not $setup) { throw "NSIS installer not found" }
+          $app = "src-tauri/target/release/context-menu-triage-app.exe"
+          $info = (Get-Item $app).VersionInfo
           if ($info.ProductName -ne 'Context Menu Triage') { throw "Unexpected ProductName: $($info.ProductName)" }
-          if (-not $info.ProductVersion.StartsWith("$packageVersion.")) { throw "Unexpected ProductVersion: $($info.ProductVersion)" }
-          if ($info.OriginalFilename -ne 'context-menu-triage.exe') { throw "Unexpected OriginalFilename: $($info.OriginalFilename)" }
-      - name: Upload unsigned executable
-        id: upload-unsigned
-        uses: actions/upload-artifact@v7
-        with:
-          name: context-menu-triage-unsigned
-          path: dist/context-menu-triage.exe
-          if-no-files-found: error
-      - name: Determine signing mode
-        id: mode
-        shell: powershell
-        env:
-          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_ORGANIZATION_ID)) {
-            Write-Warning 'SignPath is not configured; publishing an UNSIGNED interim release.'
-            "signing=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          } else {
-            "signing=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Copy-Item $setup.FullName "release-assets/context-menu-triage-setup.exe"
+          Copy-Item "dist/sbom.cdx.json" "release-assets/sbom.cdx.json"
+          Get-ChildItem release-assets -File | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content "$($_.FullName).sha256" -Encoding ascii
           }
-      - name: Submit SignPath signing request
-        if: steps.mode.outputs.signing == 'true'
-        uses: signpath/github-action-submit-signing-request@v2
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: ${{ github.workspace }}\dist\signed
-      - name: Verify signed executable
-        if: steps.mode.outputs.signing == 'true'
-        shell: powershell
-        run: |
-          $signed = Get-ChildItem .\dist\signed -Filter context-menu-triage.exe -File -Recurse
-          if ($signed.Count -ne 1) { throw "Expected one signed executable, found $($signed.Count)" }
-          Copy-Item -LiteralPath $signed.FullName -Destination .\dist\context-menu-triage.exe -Force
-          .\dist\context-menu-triage.exe audit --scope broad --quiet
-          $signature = Get-AuthenticodeSignature .\dist\context-menu-triage.exe
-          if ($signature.Status -ne 'Valid') { throw "Stable releases require a valid Authenticode signature. Status: $($signature.Status)" }
-          $hash = (Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content .\dist\context-menu-triage.exe.sha256 "$hash  context-menu-triage.exe" -Encoding ASCII
-          Write-Output "Signed SHA256: $hash"
-      - name: Verify unsigned executable
-        if: steps.mode.outputs.signing == 'false'
-        shell: powershell
-        run: |
-          .\dist\context-menu-triage.exe audit --scope broad --quiet
-          $hash = (Get-FileHash .\dist\context-menu-triage.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content .\dist\context-menu-triage.exe.sha256 "$hash  context-menu-triage.exe" -Encoding ASCII
-          Write-Output "Unsigned SHA256: $hash"
+          Get-ChildItem release-assets | Select-Object Name,Length | Format-Table -Auto
       - name: Publish GitHub Release
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
-          SIGNING: ${{ steps.mode.outputs.signing }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $signed = $env:SIGNING -eq 'true'
-          $title = if ($signed) { "Context Menu Triage $env:GITHUB_REF_NAME" } else { "Context Menu Triage $env:GITHUB_REF_NAME (unsigned interim)" }
+          $title = "Context Menu Triage $env:GITHUB_REF_NAME (unsigned interim)"
           $notes = "docs/release-notes-$version.md"
-          $args = @('release', 'create', $env:GITHUB_REF_NAME, 'dist/context-menu-triage.exe', 'dist/context-menu-triage.exe.sha256', 'dist/sbom.cdx.json', '--verify-tag', '--title', $title)
+          $args = @('release', 'create', $env:GITHUB_REF_NAME,
+            'release-assets/context-menu-triage-setup.exe',
+            'release-assets/context-menu-triage-setup.exe.sha256',
+            'release-assets/sbom.cdx.json',
+            '--verify-tag', '--title', $title)
           if (Test-Path -LiteralPath $notes) { $args += @('--notes-file', $notes) } else { $args += '--generate-notes' }
           & gh @args
           if ($LASTEXITCODE) { throw 'GitHub Release creation failed.' }

@@ -1,6 +1,6 @@
 {
   "name": "context-menu-triage",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Inspect and reversibly block Windows Explorer context menu handlers.",
   "main": "triage.js",
   "files": [

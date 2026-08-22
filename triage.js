@@ -31,7 +31,7 @@
  */
 
 'use strict';
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
@@ -90,6 +90,34 @@ const dim = s => c('2', s), red = s => c('31', s), grn = s => c('32', s),
 const PS = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
 $ProgressPreference = 'SilentlyContinue'
+# Authenticode verification is the slowest part of a scan (online cert/revocation
+# checks per DLL). Cache results on disk keyed by path+size+mtime so unchanged
+# DLLs are verified once, and dedupe repeats within a single run.
+$SigCachePath = Join-Path $env:TEMP 'triage-sigcache.json'
+$SigCache = @{}
+if (Test-Path -LiteralPath $SigCachePath) {
+  try {
+    $loaded = Get-Content -LiteralPath $SigCachePath -Raw | ConvertFrom-Json
+    foreach ($p in $loaded.PSObject.Properties) { $SigCache[$p.Name] = $p.Value }
+  } catch { $SigCache = @{} }
+}
+$SigDirty = $false
+function Get-CachedSignature($dll) {
+  $item = Get-Item -LiteralPath $dll -ErrorAction SilentlyContinue
+  if (-not $item) { return $null }
+  $key = $dll.ToLowerInvariant() + '|' + $item.Length + '|' + $item.LastWriteTimeUtc.Ticks
+  if ($SigCache.ContainsKey($key)) { return $SigCache[$key] }
+  $sig = Get-AuthenticodeSignature -LiteralPath $dll -ErrorAction SilentlyContinue
+  $status = 'None'; $signer = $null
+  if ($null -ne $sig) {
+    $status = $sig.Status.ToString()
+    if ($null -ne $sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }
+  }
+  $entry = [pscustomobject]@{ status = $status; signer = $signer }
+  $SigCache[$key] = $entry
+  $script:SigDirty = $true
+  return $entry
+}
 function Open-Key($hive, $subkey, $view) {
   $h = if ($hive -eq 'HKCU') {
     [Microsoft.Win32.RegistryHive]::CurrentUser
@@ -157,9 +185,14 @@ function Test-ParentWritable($dll) {
   }
   return ($allow -and -not $deny)
 }
-function Get-ParentPaths($hive, $view) {
+# Discovering handler parent keys (scope 'all') runs a recursive reg.exe query
+# over the whole Software\Classes tree, which is ~12s per hive/view. The four
+# combinations are independent, so run them in parallel via a runspace pool. The
+# query and filter are byte-for-byte identical to the former serial version.
+$ParentPathScript = {
+  param($hive, $view, $scope)
   $prefix = if ($hive -eq 'HKCU') { 'HKEY_CURRENT_USER' } else { 'HKEY_LOCAL_MACHINE' }
-  if ($TriageScope -eq 'broad') {
+  if ($scope -eq 'broad') {
     return @(
       '*\shellex\ContextMenuHandlers',
       'AllFilesystemObjects\shellex\ContextMenuHandlers',
@@ -176,15 +209,37 @@ function Get-ParentPaths($hive, $view) {
     -and $_ -notmatch '(?i)\\Software\\Classes\\WOW6432Node\\'
   })
 }
+function Get-AllParentPaths($scope) {
+  $combos = @()
+  foreach ($v in @('64', '32')) { foreach ($h in @('HKLM', 'HKCU')) { $combos += , @($h, $v) } }
+  $paths = @{}
+  $pool = [runspacefactory]::CreateRunspacePool(1, 4)
+  $pool.Open()
+  try {
+    $jobs = @()
+    foreach ($combo in $combos) {
+      $psi = [powershell]::Create()
+      $psi.RunspacePool = $pool
+      [void]$psi.AddScript($ParentPathScript).AddArgument($combo[0]).AddArgument($combo[1]).AddArgument($scope)
+      $jobs += [pscustomobject]@{ ps = $psi; handle = $psi.BeginInvoke(); hive = $combo[0]; view = $combo[1] }
+    }
+    foreach ($job in $jobs) {
+      $paths["$($job.hive)|$($job.view)"] = @($job.ps.EndInvoke($job.handle))
+      $job.ps.Dispose()
+    }
+  } finally { $pool.Close(); $pool.Dispose() }
+  return $paths
+}
 $blocked = @{}
 $bk = Get-Item -LiteralPath ('Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Shell Extensions\Blocked') -ErrorAction SilentlyContinue
 if ($bk) { foreach ($n in $bk.GetValueNames()) { if ($n) { $blocked[$n.ToUpper()] = $true } } }
 $guid = '^\{[0-9A-Fa-f-]{36}\}$'
+$parentPaths = Get-AllParentPaths $TriageScope
 $map = @{}
 foreach ($view in @('64', '32')) {
   foreach ($hive in @('HKLM', 'HKCU')) {
     $prefix = if ($hive -eq 'HKCU') { 'HKEY_CURRENT_USER\' } else { 'HKEY_LOCAL_MACHINE\' }
-    foreach ($parentPath in (Get-ParentPaths $hive $view)) {
+    foreach ($parentPath in $parentPaths["$hive|$view"]) {
       $subkey = $parentPath.Substring($prefix.Length)
       $parent = Open-Key $hive $subkey $view
       if (-not $parent) { continue }
@@ -236,10 +291,10 @@ $results = @(foreach ($entry in @($map.Values)) {
     $wr = ('' + $env:SystemRoot).TrimEnd('\').ToLowerInvariant() + '\'
     $underWin = $dll.ToLowerInvariant().StartsWith($wr)
     if ($exists) {
-      $sig = Get-AuthenticodeSignature -LiteralPath $dll -ErrorAction SilentlyContinue
-      if ($null -ne $sig) {
-        $status = $sig.Status.ToString()
-        if ($null -ne $sig.SignerCertificate) { $signer = $sig.SignerCertificate.Subject }
+      $cachedSig = Get-CachedSignature $dll
+      if ($null -ne $cachedSig) {
+        $status = $cachedSig.status
+        $signer = $cachedSig.signer
       }
     }
   }
@@ -257,6 +312,9 @@ $results = @(foreach ($entry in @($map.Values)) {
     blocked = [bool]$blocked[$entry.clsid]
   }
 })
+if ($SigDirty) {
+  try { $SigCache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $SigCachePath -Encoding UTF8 } catch {}
+}
 $results | ConvertTo-Json -Depth 8
 `;
 
@@ -751,14 +809,21 @@ function apiTokenValid(req, token) {
   return req.headers['x-triage-token'] === token || url.searchParams.get('t') === token;
 }
 
-async function handleApi(req, res, route, token, scope, port) {
+async function handleApi(req, res, route, token, state, port) {
   if (!apiTokenValid(req, token)) return sendJson(res, 403, { error: 'Invalid or missing API token.' });
+  const scope = state.scope;
   if (req.method === 'GET' && route === '/api/handlers') return sendJson(res, 200, enumerateCached(scope));
   if (req.method === 'GET' && route === '/api/blocked') return sendJson(res, 200, [...getBlockedClsids()]);
   if (req.method === 'GET' && route === '/api/classic-menu') return sendJson(res, 200, { enabled: classicMenuEnabled() });
   if (req.method === 'GET' && route === '/api/admin') return sendJson(res, 200, { admin: isAdmin() });
   if (req.method === 'GET' && route === '/api/conflicts') return sendJson(res, 200, computeConflicts(enumerateCached(scope)));
   if (req.method === 'GET' && route === '/api/meta') return sendJson(res, 200, { version: VERSION, scope, machine: machineMetadata(scope) });
+  if (req.method === 'POST' && route === '/api/scope') {
+    const body = await readBody(req);
+    if (!['all', 'broad'].includes(body.scope)) return sendJson(res, 400, { error: 'scope must be all or broad' });
+    state.scope = body.scope;
+    return sendJson(res, 200, { scope: state.scope });
+  }
 
   if (req.method === 'POST' && route === '/api/block') {
     if (adminRequired(res)) return;
@@ -819,14 +884,63 @@ function relaunchGuiAsAdmin(port, scope) {
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { stdio: 'ignore', env: powershellEnv() });
 }
 
+// Locate a Chromium browser (Edge, then Chrome) so the GUI can open in a
+// dedicated app window instead of a tab in the user's default browser.
+function findChromiumBrowser() {
+  const pf = process.env['ProgramFiles'] || 'C:\\Program Files';
+  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const local = process.env['LOCALAPPDATA'] || path.join(os.homedir(), 'AppData', 'Local');
+  const candidates = [
+    path.join(pf86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(pf, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    path.join(local, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+  ];
+  for (const exe of candidates) {
+    try { if (fs.statSync(exe).isFile()) return exe; } catch {}
+  }
+  return null;
+}
+
+// Open the GUI as its own chromeless window (Chromium --app mode). A dedicated
+// user-data-dir guarantees a separate window even when the browser is already
+// running. Falls back to the default browser as a tab if no Chromium is found.
+function openGuiWindow(url) {
+  const browser = findChromiumBrowser();
+  if (browser) {
+    const profileDir = path.join(os.tmpdir(), 'triage-gui-profile');
+    try {
+      const child = spawn(browser, [
+        `--app=${url}`,
+        `--user-data-dir=${profileDir}`,
+        '--window-size=1200,800',
+        '--no-first-run',
+        '--no-default-browser-check',
+      ], { detached: true, stdio: 'ignore' });
+      child.on('error', () => openGuiTab(url));
+      child.unref();
+      return;
+    } catch { /* fall through to tab */ }
+  }
+  openGuiTab(url);
+}
+
+function openGuiTab(url) {
+  try { execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' }); } catch {}
+}
+
 function startGui(args) {
   const portIndex = args.indexOf('--port');
   const port = portIndex >= 0 ? parseInt(args[portIndex + 1], 10) : 7373;
   if (!Number.isInteger(port) || port < 1 || port > 65535) fail('valid --port required');
   const noOpen = args.includes('--no-open');
-  const scope = scanScope(args);
+  // The GUI defaults to the fast 'broad' scan (7 common right-click surfaces)
+  // for a near-instant first paint; the toolbar toggles a full scan on demand.
+  // An explicit --scope on the command line still wins.
+  const state = { scope: args.includes('--scope') ? scanScope(args) : 'broad' };
   if (args.includes('--elevate') && !isAdmin()) {
-    relaunchGuiAsAdmin(port, scope);
+    relaunchGuiAsAdmin(port, state.scope);
     console.log(grn('\n  requested administrator GUI launch.\n'));
     return;
   }
@@ -850,7 +964,7 @@ function startGui(args) {
         res.end();
         return;
       }
-      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname, token, scope, port);
+      if (url.pathname.startsWith('/api/')) return await handleApi(req, res, url.pathname, token, state, port);
       sendJson(res, 404, { error: 'not found' });
     } catch (e) {
       sendJson(res, e.status || (e.body && e.body.needsAdmin ? 403 : 500), { error: e.message || String(e), needsAdmin: !!(e.body && e.body.needsAdmin) });
@@ -860,9 +974,7 @@ function startGui(args) {
     const url = `http://${host}:${port}/?t=${token}`;
     console.log(grn(`\n  GUI listening: ${url}`));
     console.log(dim('  press Ctrl+C to stop.\n'));
-    if (!noOpen) {
-      try { execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' }); } catch {}
-    }
+    if (!noOpen) openGuiWindow(url);
   });
 }
 

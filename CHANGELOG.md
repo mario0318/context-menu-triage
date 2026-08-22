@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 - 2026-08-22
+
+- The GUI is now a real native desktop window (Tauri + WebView2) instead of a browser tab, with its own application icon on the window, taskbar, and executable, and no leftover console window.
+- New application icon: a cursor triaging a kept (check) and blocked (X) entry; the interface palette is unified to match it.
+- The window sizes itself to fit the display and never forces a maximize; the layout stays stable across window sizes, with no clipped controls or horizontal scrollbars.
+- Handler rows disable and enable in place with immediate result feedback, and Back up / Restore are now clearly labelled with the automatic pre-change backup surfaced on the first change.
+- Ships as a per-user Windows installer.
+
 ## 1.2.0 - 2026-08-22
 
 - The GUI opens in its own standalone window (Edge or Chrome app mode), not a tab in the default browser, and falls back to a browser tab when no Chromium browser is present.

@@ -13,9 +13,11 @@ Context Menu Triage separates the evidence that matters: HKLM versus HKCU regist
 
 ## Install
 
-Download the latest build: **[context-menu-triage.exe](https://github.com/mario0318/context-menu-triage/releases/latest/download/context-menu-triage.exe)** (and its [`.sha256`](https://github.com/mario0318/context-menu-triage/releases/latest/download/context-menu-triage.exe.sha256) checksum). All binaries are published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases/latest).
+Download and run the installer: **[context-menu-triage-setup.exe](https://github.com/mario0318/context-menu-triage/releases/latest/download/context-menu-triage-setup.exe)** (and its [`.sha256`](https://github.com/mario0318/context-menu-triage/releases/latest/download/context-menu-triage-setup.exe.sha256) checksum). All builds are published under [GitHub Releases](https://github.com/mario0318/context-menu-triage/releases/latest).
 
-The current release is an **unsigned interim build**: the SignPath Foundation open-source signing application is still pending, so Windows SmartScreen may warn about an unknown publisher until Authenticode signing is active. Verify each download against its published `context-menu-triage.exe.sha256` checksum. The executable contains the GUI and CLI and has no runtime dependencies; double-clicking it opens the GUI in its own window.
+Context Menu Triage is a native Windows desktop application (Tauri + WebView2). The installer is **per-user** and needs no administrator rights to install; disabling, enabling, or importing handlers requests administrator rights at the moment they are used. The app opens in its own window with its own icon.
+
+The current release is an **unsigned interim build**: the SignPath Foundation open-source signing application is still pending, so Windows SmartScreen may warn about an unknown publisher until Authenticode signing is active. Verify each download against its published `.sha256` checksum.
 
 From source, install Node.js 20 or newer and run:
 

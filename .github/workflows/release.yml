@@ -34,7 +34,7 @@ jobs:
       - name: Build native app and installer
         shell: powershell
         run: npm run app:build
-      - name: Collect release assets
+      - name: Stage installer
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force release-assets | Out-Null
@@ -45,7 +45,52 @@ jobs:
           if ($info.ProductName -ne 'Context Menu Triage') { throw "Unexpected ProductName: $($info.ProductName)" }
           Copy-Item $setup.FullName "release-assets/context-menu-triage-setup.exe"
           Copy-Item "dist/sbom.cdx.json" "release-assets/sbom.cdx.json"
-          Get-ChildItem release-assets -File | ForEach-Object {
+      - name: Determine signing mode
+        id: mode
+        shell: powershell
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_ORGANIZATION_ID)) {
+            Write-Warning 'SignPath is not configured; publishing an UNSIGNED interim release.'
+            "signing=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } else {
+            "signing=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
+      - name: Upload unsigned installer
+        id: upload-unsigned
+        if: steps.mode.outputs.signing == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: context-menu-triage-installer-unsigned
+          path: release-assets/context-menu-triage-setup.exe
+          if-no-files-found: error
+      - name: Submit SignPath signing request
+        if: steps.mode.outputs.signing == 'true'
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ github.workspace }}\signed
+      - name: Verify signed installer
+        if: steps.mode.outputs.signing == 'true'
+        shell: powershell
+        run: |
+          $signed = Get-ChildItem .\signed -Filter *setup*.exe -File -Recurse | Select-Object -First 1
+          if (-not $signed) { throw "Signed installer not returned by SignPath" }
+          Copy-Item -LiteralPath $signed.FullName -Destination "release-assets/context-menu-triage-setup.exe" -Force
+          $signature = Get-AuthenticodeSignature "release-assets/context-menu-triage-setup.exe"
+          if ($signature.Status -ne 'Valid') { throw "Stable releases require a valid Authenticode signature. Status: $($signature.Status)" }
+          Write-Output "Signed installer Authenticode: $($signature.Status)"
+      - name: Checksums
+        shell: powershell
+        run: |
+          Get-ChildItem release-assets -File | Where-Object { $_.Extension -ne '.sha256' } | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $($_.Name)" | Set-Content "$($_.FullName).sha256" -Encoding ascii
           }
@@ -54,9 +99,11 @@ jobs:
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
+          SIGNING: ${{ steps.mode.outputs.signing }}
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
-          $title = "Context Menu Triage $env:GITHUB_REF_NAME (unsigned interim)"
+          $signed = $env:SIGNING -eq 'true'
+          $title = if ($signed) { "Context Menu Triage $env:GITHUB_REF_NAME" } else { "Context Menu Triage $env:GITHUB_REF_NAME (unsigned interim)" }
           $notes = "docs/release-notes-$version.md"
           $args = @('release', 'create', $env:GITHUB_REF_NAME,
             'release-assets/context-menu-triage-setup.exe',

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The GUI backend now shuts down with whoever launched it instead of lingering: it exits when its parent's stdin closes (native shell or terminal, on a clean exit or a force-kill), and an elevated GUI exits when the process that launched it goes away. This stops orphaned local servers from accumulating and holding their ports.
+- A GUI launch on a port that is already in use now fails with a clear message instead of an unhandled crash.
+
 ## 1.3.0 - 2026-08-22
 
 - The GUI is now a real native desktop window (Tauri + WebView2) instead of a browser tab, with its own application icon on the window, taskbar, and executable, and no leftover console window.

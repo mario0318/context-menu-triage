@@ -860,7 +860,9 @@ async function handleApi(req, res, route, token, state, port) {
   }
   if (req.method === 'POST' && route === '/api/relaunch-admin') {
     if (isAdmin()) return sendJson(res, 200, { alreadyAdmin: true });
-    relaunchGuiAsAdmin(port + 1, scope);
+    // This server keeps running to serve the elevated child's lifecycle: the
+    // child watches our pid and exits when we do (see --parent-pid handling).
+    relaunchGuiAsAdmin(port + 1, scope, process.pid);
     return sendJson(res, 200, { launched: true, port: port + 1 });
   }
   if (req.method === 'POST' && route === '/api/restart-explorer') {
@@ -874,11 +876,15 @@ function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
-function relaunchGuiAsAdmin(port, scope) {
+function relaunchGuiAsAdmin(port, scope, parentPid) {
   const executable = process.execPath;
+  const baseArgs = ['gui', '--port', String(port), '--scope', scope];
+  // An elevated GUI is detached from us with no stdin link, so it watches the
+  // launching process id instead and exits once that process goes away.
+  if (Number.isInteger(parentPid) && parentPid > 0) baseArgs.push('--parent-pid', String(parentPid));
   const argumentsList = path.basename(executable).toLowerCase() === 'node.exe'
-    ? [__filename, 'gui', '--port', String(port), '--scope', scope]
-    : ['gui', '--port', String(port), '--scope', scope];
+    ? [__filename, ...baseArgs]
+    : baseArgs;
   const script = `$argsList = @(${argumentsList.map(psQuote).join(',')}); Start-Process -Verb RunAs -FilePath ${psQuote(executable)} -ArgumentList $argsList -WindowStyle Hidden`;
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], { stdio: 'ignore', env: powershellEnv() });
@@ -969,6 +975,41 @@ function startGui(args) {
     } catch (e) {
       sendJson(res, e.status || (e.body && e.body.needsAdmin ? 403 : 500), { error: e.message || String(e), needsAdmin: !!(e.body && e.body.needsAdmin) });
     }
+  });
+  // Lifecycle: the backend must never outlive whoever launched it. Windows does
+  // not reap child trees, so a server orphaned by a hard-killed parent would
+  // keep holding its port until killed by hand. Tie our lifetime to the parent.
+  let closing = false;
+  const shutdown = () => {
+    if (closing) return;
+    closing = true;
+    try { server.close(); } catch {}
+    process.exit(0);
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+  const parentPidIndex = args.indexOf('--parent-pid');
+  const parentPid = parentPidIndex >= 0 ? parseInt(args[parentPidIndex + 1], 10) : NaN;
+  if (Number.isInteger(parentPid) && parentPid > 0) {
+    // Detached/elevated child: no stdin link to the launcher, so poll its pid.
+    const watch = setInterval(() => {
+      let alive = true;
+      try { process.kill(parentPid, 0); } catch (e) { alive = e.code === 'EPERM'; }
+      if (!alive) shutdown();
+    }, 2000);
+    watch.unref();
+  } else {
+    // Sidecar/terminal launch: the parent owns our stdin, so its close — on a
+    // clean exit or a force-kill — reaches us as EOF and becomes our shutdown.
+    process.stdin.on('end', shutdown);
+    process.stdin.on('close', shutdown);
+    process.stdin.on('error', () => {});
+    process.stdin.resume();
+  }
+  server.on('error', (e) => {
+    fail(e && e.code === 'EADDRINUSE'
+      ? `port ${port} is already in use; pass a different --port`
+      : (e && e.message) || String(e));
   });
   server.listen(port, host, () => {
     const url = `http://${host}:${port}/?t=${token}`;

@@ -17,7 +17,7 @@ Download and run the installer: **[context-menu-triage-setup.exe](https://github
 
 Context Menu Triage is a native Windows desktop application (Tauri + WebView2). The installer is **per-user** and needs no administrator rights to install; disabling, enabling, or importing handlers requests administrator rights at the moment they are used. The app opens in its own window with its own icon.
 
-The current release is an **unsigned interim build**: the SignPath Foundation open-source signing application is still pending, so Windows SmartScreen may warn about an unknown publisher until Authenticode signing is active. Verify each download against its published `.sha256` checksum.
+The current release is **unsigned**. Windows SmartScreen may warn about an unknown publisher. Verify each download against its published `.sha256` checksum before running it. The release also includes a CycloneDX SBOM and GitHub's published asset digest.
 
 From source, install Node.js 20 or newer and run:
 
@@ -101,4 +101,4 @@ See [SECURITY.md](SECURITY.md) for security boundaries and reporting guidance, a
 
 ## Code Signing Policy
 
-The project is applying for **Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)**. Stable releases will remain gated until that public-trust integration is accepted and verified. See the [code signing policy](CODE_SIGNING_POLICY.md), [privacy policy](PRIVACY.md), and maintainer [signing setup](SIGNING.md).
+There is no active Authenticode signing certificate for this project today. Releases are labeled unsigned and ship with a SHA-256 checksum and SBOM so their contents can be independently verified. A future signed release will name its certificate issuer and include signature-verification instructions. See the [code signing policy](CODE_SIGNING_POLICY.md), [privacy policy](PRIVACY.md), and maintainer [signing setup](SIGNING.md).

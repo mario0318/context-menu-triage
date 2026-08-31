@@ -52,7 +52,7 @@ jobs:
           SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_ORGANIZATION_ID)) {
-            Write-Warning 'SignPath is not configured; publishing an UNSIGNED interim release.'
+            Write-Warning 'SignPath is not configured; publishing an unsigned release.'
             "signing=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           } else {
             "signing=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -103,7 +103,7 @@ jobs:
         run: |
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           $signed = $env:SIGNING -eq 'true'
-          $title = if ($signed) { "Context Menu Triage $env:GITHUB_REF_NAME" } else { "Context Menu Triage $env:GITHUB_REF_NAME (unsigned interim)" }
+          $title = if ($signed) { "Context Menu Triage $env:GITHUB_REF_NAME" } else { "Context Menu Triage $env:GITHUB_REF_NAME (unsigned)" }
           $notes = "docs/release-notes-$version.md"
           $args = @('release', 'create', $env:GITHUB_REF_NAME,
             'release-assets/context-menu-triage-setup.exe',

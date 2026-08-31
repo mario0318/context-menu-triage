@@ -14,4 +14,4 @@ Install: download and run the installer below (`context-menu-triage-setup.exe`).
 
 Windows 11 note: this inventories legacy `IContextMenu` handlers shown under **Show more options** or Shift+F10. It does not enumerate the primary `IExplorerCommand` menu.
 
-Signing note: this is an **unsigned interim release** published while the SignPath Foundation open-source signing application is pending. Windows SmartScreen may warn about an unknown publisher until Authenticode signing is active. Verify the download against its published `.sha256` checksum. A future release will carry a valid Authenticode signature.
+Signing note: this is an **unsigned release**. Windows SmartScreen may warn about an unknown publisher. Verify the download against its published `.sha256` checksum before running it; the release also includes a CycloneDX SBOM and GitHub release-asset digest. A future signed release will identify its certificate issuer and include signature-verification instructions.

@@ -1,29 +1,30 @@
 # Code Signing Policy
 
-Context Menu Triage is applying for the SignPath Foundation open-source code-signing program. After acceptance, stable Windows release binaries will use **Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/)**.
+Context Menu Triage does not currently have an Authenticode signing certificate. The SignPath Foundation application was declined because the project has not yet established the public adoption and independent visibility required by that program. The project may reapply when those signals exist, or use another trusted signing provider in the future.
 
-Unsigned development artifacts are labeled as such and are not stable releases. A stable release must be built from a version tag by the public GitHub Actions workflow, submitted to SignPath from that workflow, manually approved, timestamped, and verified as a valid Authenticode signature before GitHub publishes it.
+Current releases are unsigned and labeled accordingly. They are built from version tags by the public GitHub Actions workflow and include a SHA-256 checksum, CycloneDX SBOM, GitHub release-asset digest, and source tag. Users should verify the checksum before running an installer.
 
-Interim releases: until SignPath Foundation accepts the project and provisions signing, tagged releases are published as clearly labeled **unsigned interim builds** ("unsigned interim" in the release title) by the same public workflow, each with a SHA-256 checksum and CycloneDX SBOM. Once SignPath is configured, the workflow automatically switches to the signed path above and signed releases become the stable default.
+If signing is configured later, a release must be built from a version tag by the public GitHub Actions workflow, manually approved by the maintainer, timestamped, and verified as a valid Authenticode signature before publication. Its release notes will identify the certificate issuer and signing path.
 
 ## Team Roles
 
 - Committer and reviewer: [mario0318](https://github.com/mario0318)
 - Signing approver: [mario0318](https://github.com/mario0318)
 
-The maintainer uses multi-factor authentication for GitHub and SignPath. Contributions from anyone without direct commit access require review before merge. Every release signing request requires manual approval.
+The maintainer uses multi-factor authentication for GitHub. Contributions from anyone without direct commit access require review before merge. Every future release-signing request requires manual approval.
 
 ## Build Integrity
 
 - Source repository: <https://github.com/mario0318/context-menu-triage>
 - Build system: GitHub Actions on GitHub-hosted Windows runners
 - Release trigger: a `v*` tag that matches `package.json`
-- Signed artifact: `context-menu-triage.exe`
+- Current artifact: `context-menu-triage-setup.exe` (unsigned)
 - Required PE product name: `Context Menu Triage`
 - Required file and product version: the release version
-- Verification: valid Authenticode status, executable smoke test, SHA-256 checksum, and CycloneDX SBOM
+- Current verification: executable smoke test, SHA-256 checksum, GitHub release-asset digest, and CycloneDX SBOM
+- Future signed-release verification: valid Authenticode status, executable smoke test, SHA-256 checksum, and CycloneDX SBOM
 
-The release workflow uploads the unsigned executable as a GitHub Actions artifact before requesting a signature. It publishes only the executable returned by SignPath.
+The release workflow uploads the installer and its verification material to GitHub Releases. If signing is configured, it must publish only the installer returned by the signing provider after signature validation.
 
 ## Privacy
 

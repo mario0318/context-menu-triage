@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write # OIDC federated login to Azure for Trusted Signing
 
 jobs:
   release:
@@ -49,41 +50,37 @@ jobs:
         id: mode
         shell: powershell
         env:
-          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          AZURE_SIGNING_ACCOUNT: ${{ vars.AZURE_SIGNING_ACCOUNT }}
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_ORGANIZATION_ID)) {
-            Write-Warning 'SignPath is not configured; publishing an unsigned release.'
+          if ([string]::IsNullOrWhiteSpace($env:AZURE_SIGNING_ACCOUNT)) {
+            Write-Warning 'Azure Trusted Signing is not configured; publishing an unsigned release.'
             "signing=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           } else {
             "signing=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           }
-      - name: Upload unsigned installer
-        id: upload-unsigned
+      - name: Azure login (OIDC)
         if: steps.mode.outputs.signing == 'true'
-        uses: actions/upload-artifact@v7
+        uses: azure/login@v2
         with:
-          name: context-menu-triage-installer-unsigned
-          path: release-assets/context-menu-triage-setup.exe
-          if-no-files-found: error
-      - name: Submit SignPath signing request
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign installer (Azure Trusted Signing)
         if: steps.mode.outputs.signing == 'true'
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: azure/trusted-signing-action@v0.5.1
         with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
-          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
-          wait-for-completion: true
-          output-artifact-directory: ${{ github.workspace }}\signed
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_CERT_PROFILE }}
+          files-folder: ${{ github.workspace }}\release-assets
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
       - name: Verify signed installer
         if: steps.mode.outputs.signing == 'true'
         shell: powershell
         run: |
-          $signed = Get-ChildItem .\signed -Filter *setup*.exe -File -Recurse | Select-Object -First 1
-          if (-not $signed) { throw "Signed installer not returned by SignPath" }
-          Copy-Item -LiteralPath $signed.FullName -Destination "release-assets/context-menu-triage-setup.exe" -Force
           $signature = Get-AuthenticodeSignature "release-assets/context-menu-triage-setup.exe"
           if ($signature.Status -ne 'Valid') { throw "Stable releases require a valid Authenticode signature. Status: $($signature.Status)" }
           Write-Output "Signed installer Authenticode: $($signature.Status)"

@@ -1,43 +1,41 @@
 # Signing Setup
 
-Signing is not currently active. The SignPath Foundation application was declined because the project does not yet meet its public-trust and visibility threshold. This document retains the prepared trusted-build configuration for a future approved SignPath project or equivalent provider; it is not evidence that a certificate is active.
+Stable Windows releases are signed with **Azure Trusted Signing** (Azure Artifact Signing), a Microsoft-managed public-trust Authenticode service. The SignPath Foundation application was declined, so that path is retired. Signing is gated: until the Azure variables below are set on the repository, the release workflow publishes a clearly labelled unsigned build. Once they are set, the same workflow signs the installer and requires a valid Authenticode signature before publishing.
 
-## Application
+Azure Trusted Signing is a paid service (Basic plan ~$9.99/month). As of its general availability it accepts self-employed individuals with no multi-year business-history requirement; the signer must be in the US, Canada, EU, or UK for a public-trust certificate.
+
+## Artifact
 
 - Project: `Context Menu Triage`
 - Repository: <https://github.com/mario0318/context-menu-triage>
 - License: MIT
-- Artifact: per-user Windows x64 NSIS installer (`context-menu-triage-setup.exe`) that contains two PE files — the native app shell `context-menu-triage-app.exe` and the bundled scanner sidecar `context-menu-triage.exe`
+- Artifact: per-user Windows x64 NSIS installer (`context-menu-triage-setup.exe`)
 - Build system: GitHub Actions on GitHub-hosted Windows runners (Tauri, `npm run app:build`)
-- Project slug requested: `context-menu-triage`
-- Signing policy slug requested: `release-signing`
-- Artifact configuration slug requested: `windows-installer`
 
-The public [code signing policy](CODE_SIGNING_POLICY.md) documents current unsigned-release verification, team roles, privacy, release controls, system changes, and removal.
+## One-time Azure provisioning
 
-## SignPath Configuration
+1. In the Azure portal, register the `Microsoft.CodeSigning` resource provider on the subscription.
+2. Create a **Trusted Signing account** and a **certificate profile** of type **Public Trust** (identity validation: Individual). Note the account's region endpoint, e.g. `https://eus.codesigning.azure.net/`, the account name, and the certificate-profile name.
+3. Create an **Entra ID app registration** (or a user-assigned managed identity) to act as the signing identity. Record its **client ID**, the **tenant ID**, and the **subscription ID**.
+4. Grant that identity the **Trusted Signing Certificate Profile Signer** role on the Trusted Signing account (or on the certificate profile).
+5. Add a **federated credential** to the app registration for GitHub OIDC, so no client secret is stored:
+   - Issuer: `https://token.actions.githubusercontent.com`
+   - Subject: `repo:mario0318/context-menu-triage:environment:release`
+   - Audience: `api://AzureADTokenExchange`
 
-After acceptance:
+## GitHub repository variables
 
-1. Install the SignPath GitHub App for this repository.
-2. Configure a GitHub trusted build system for the repository.
-3. Configure the artifact as an **NSIS installer** (`context-menu-triage-setup.exe`) with recursive signing: Authenticode-sign the two contained PE files (`context-menu-triage-app.exe` and `context-menu-triage.exe`) first, then sign the installer itself.
-4. Enforce `ProductName = Context Menu Triage` and release-version metadata on `context-menu-triage-app.exe`.
-5. Restrict release signing to version tags and GitHub-hosted runners.
-6. Require one manual approval for every signing request.
-7. Create a SignPath API token with submitter permission only.
+Set these as repository **variables** (Settings → Secrets and variables → Actions → Variables). None are secrets — OIDC supplies the credential at run time, and `AZURE_SIGNING_ACCOUNT` is the switch that turns signing on.
 
-Set these GitHub repository variables:
-
-- `SIGNPATH_ORGANIZATION_ID`
-- `SIGNPATH_PROJECT_SLUG`
-- `SIGNPATH_SIGNING_POLICY_SLUG`
-- `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`
-
-Set `SIGNPATH_API_TOKEN` as a GitHub Actions secret in the `release` environment. Do not store the token in the repository.
+- `AZURE_SIGNING_ACCOUNT` — Trusted Signing account name
+- `AZURE_SIGNING_ENDPOINT` — region endpoint, e.g. `https://eus.codesigning.azure.net/`
+- `AZURE_SIGNING_CERT_PROFILE` — certificate-profile name
+- `AZURE_CLIENT_ID` — app registration / managed identity client ID
+- `AZURE_TENANT_ID` — Entra tenant ID
+- `AZURE_SUBSCRIPTION_ID` — subscription ID
 
 ## Release
 
-The release tag must match `package.json` and `src-tauri/tauri.conf.json`, including any prerelease suffix. The workflow builds the native app and installer (`npm run app:build`) and enforces PE metadata on `context-menu-triage-app.exe`. When the `SIGNPATH_*` variables and token are present it uploads the unsigned installer to GitHub Actions, submits its artifact ID to SignPath, waits for manual approval, downloads the signed installer, requires `Get-AuthenticodeSignature` on it to return `Valid`, regenerates the checksum after signing, and publishes the signed installer with its SBOM. When SignPath is not configured it publishes an unsigned interim release with the same assets, titled accordingly.
+The release tag must match `package.json` and `src-tauri/tauri.conf.json`, including any prerelease suffix. The `release` environment requires one manual approval. The workflow builds the native app and NSIS installer (`npm run app:build`), enforces the `Context Menu Triage` product name, and — when the Azure variables are present — logs in to Azure over OIDC, signs the installer with Trusted Signing, and requires `Get-AuthenticodeSignature` to return `Valid` before it generates checksums and publishes the installer with its SBOM. With the variables absent, it publishes the same installer unsigned, labelled as such.
 
-Unsigned releases must remain explicitly labelled as unsigned. Once a signing provider is provisioned and its signature validation is verified, signed releases become the default and their notes must name the issuer.
+Unsigned releases must remain explicitly labelled as unsigned. The `azure/trusted-signing-action` version pinned in the workflow should be checked against the action's latest release when signing is first enabled.

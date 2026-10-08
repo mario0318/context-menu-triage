@@ -1,6 +1,6 @@
 # Code Signing Policy
 
-Context Menu Triage does not currently have an Authenticode signing certificate. The SignPath Foundation application was declined because the project has not yet established the public adoption and independent visibility required by that program. The project may reapply when those signals exist, or use another trusted signing provider in the future.
+Context Menu Triage does not currently have an active Authenticode signing certificate. The SignPath Foundation application was declined, so the project targets **Azure Trusted Signing** (Azure Artifact Signing) as its signing provider; the release workflow signs automatically once that account is provisioned and its repository variables are set. See the [signing setup](SIGNING.md).
 
 Current releases are unsigned and labeled accordingly. They are built from version tags by the public GitHub Actions workflow and include a SHA-256 checksum, CycloneDX SBOM, GitHub release-asset digest, and source tag. Users should verify the checksum before running an installer.
 

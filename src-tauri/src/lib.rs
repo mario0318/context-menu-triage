@@ -58,10 +58,30 @@ pub fn run() {
                 while let Some(event) = rx.recv().await {
                     match event {
                         CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                            let line = String::from_utf8_lossy(&bytes);
+                            // The backend asks us to relaunch the whole app
+                            // elevated (the "launch as administrator" action).
+                            if line.contains("@@TRIAGE-ELEVATE@@") {
+                                if let Ok(exe) = std::env::current_exe() {
+                                    let _ = std::process::Command::new("powershell")
+                                        .args([
+                                            "-NoProfile",
+                                            "-WindowStyle",
+                                            "Hidden",
+                                            "-Command",
+                                            &format!(
+                                                "Start-Process -FilePath \"{}\" -Verb RunAs",
+                                                exe.display()
+                                            ),
+                                        ])
+                                        .spawn();
+                                }
+                                handle.exit(0);
+                                continue;
+                            }
                             if navigated {
                                 continue;
                             }
-                            let line = String::from_utf8_lossy(&bytes);
                             if let Some(url) = extract_url(&line) {
                                 if let (Some(win), Ok(parsed)) =
                                     (handle.get_webview_window("main"), tauri::Url::parse(&url))

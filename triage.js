@@ -928,9 +928,21 @@ async function handleApi(req, res, route, token, state, port) {
   }
   if (req.method === 'POST' && route === '/api/relaunch-admin') {
     if (isAdmin()) return sendJson(res, 200, { alreadyAdmin: true });
-    // This server keeps running to serve the elevated child's lifecycle: the
-    // child watches our pid and exits when we do (see --parent-pid handling).
-    relaunchGuiAsAdmin(port + 1, scope, process.pid);
+    if (state.noOpen) {
+      // Native shell (Tauri): the window is not ours to relaunch, so signal the
+      // shell to restart the whole app elevated and take over from this one.
+      process.stdout.write('@@TRIAGE-ELEVATE@@\n');
+      return sendJson(res, 200, { launched: true, native: true });
+    }
+    // Portable window: open an elevated window on its own port, then close this
+    // window so the elevated one replaces it instead of leaving two. The
+    // elevated instance owns its own window, so it gets no --parent-pid.
+    try {
+      relaunchGuiAsAdmin(port + 1, scope);
+    } catch (e) {
+      return sendJson(res, 200, { launched: false, error: (e && e.message) || 'elevation canceled' });
+    }
+    if (state.guiChild) setTimeout(() => { try { state.guiChild.kill(); } catch {} }, 1500);
     return sendJson(res, 200, { launched: true, port: port + 1 });
   }
   if (req.method === 'POST' && route === '/api/restart-explorer') {
@@ -997,11 +1009,11 @@ function openGuiWindow(url, onClose) {
       // Tie the backend's life to the window: when the GUI window closes, the
       // server exits too, so no orphaned process or console is left behind.
       if (typeof onClose === 'function') child.on('exit', onClose);
-      return true;
+      return child;
     } catch { /* fall through to tab */ }
   }
   openGuiTab(url);
-  return false;
+  return null;
 }
 
 function openGuiTab(url) {
@@ -1042,7 +1054,7 @@ function startGui(args) {
   // The GUI defaults to the fast 'broad' scan (7 common right-click surfaces)
   // for a near-instant first paint; the toolbar toggles a full scan on demand.
   // An explicit --scope on the command line still wins.
-  const state = { scope: args.includes('--scope') ? scanScope(args) : 'broad' };
+  const state = { scope: args.includes('--scope') ? scanScope(args) : 'broad', noOpen };
   if (args.includes('--elevate') && !isAdmin()) {
     relaunchGuiAsAdmin(port, state.scope);
     console.log(grn('\n  requested administrator GUI launch.\n'));
@@ -1084,26 +1096,32 @@ function startGui(args) {
     try { server.close(); } catch {}
     process.exit(0);
   };
+  state.shutdown = shutdown;
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // Lifecycle: the backend must never outlive whoever launched it (Windows does
+  // not reap child trees). It ties to exactly one owner: an explicit --parent-pid
+  // to poll, else the window it opens, else — when it opens no window of its own
+  // — the stdin the launcher pipes it. A window-owning instance never also
+  // watches stdin, since a detached/elevated launch has no real stdin.
   const parentPidIndex = args.indexOf('--parent-pid');
   const parentPid = parentPidIndex >= 0 ? parseInt(args[parentPidIndex + 1], 10) : NaN;
+  let bound = false;
   if (Number.isInteger(parentPid) && parentPid > 0) {
-    // Detached/elevated child: no stdin link to the launcher, so poll its pid.
     const watch = setInterval(() => {
       let alive = true;
       try { process.kill(parentPid, 0); } catch (e) { alive = e.code === 'EPERM'; }
       if (!alive) shutdown();
     }, 2000);
     watch.unref();
-  } else {
-    // Sidecar/terminal launch: the parent owns our stdin, so its close — on a
-    // clean exit or a force-kill — reaches us as EOF and becomes our shutdown.
+    bound = true;
+  }
+  const watchStdin = () => {
     process.stdin.on('end', shutdown);
     process.stdin.on('close', shutdown);
     process.stdin.on('error', () => {});
     process.stdin.resume();
-  }
+  };
   server.on('error', (e) => {
     fail(e && e.code === 'EADDRINUSE'
       ? `port ${port} is already in use; pass a different --port`
@@ -1114,11 +1132,18 @@ function startGui(args) {
     console.log(grn(`\n  GUI listening: ${url}`));
     console.log(dim('  press Ctrl+C to stop.\n'));
     if (!noOpen) {
-      const windowed = openGuiWindow(url, shutdown);
-      // When we opened our own window, hide the leftover console (double-click
-      // launch only; a user's terminal is left alone).
-      if (windowed) hideOwnConsole();
+      const child = openGuiWindow(url, shutdown);
+      if (child) {
+        // We own this window: its close is our shutdown, and we hide the
+        // leftover console (our own double-click console only).
+        state.guiChild = child;
+        bound = true;
+        hideOwnConsole();
+      }
     }
+    // Nothing else owns our lifetime (native sidecar with piped stdin, a
+    // headless --no-open launch, or a window-less tab fallback): watch stdin.
+    if (!bound) watchStdin();
   });
 }
 

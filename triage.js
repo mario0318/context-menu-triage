@@ -992,10 +992,13 @@ function findChromiumBrowser() {
 // Open the GUI as its own chromeless window (Chromium --app mode). A dedicated
 // user-data-dir guarantees a separate window even when the browser is already
 // running. Falls back to the default browser as a tab if no Chromium is found.
-function openGuiWindow(url, onClose) {
+function openGuiWindow(url, port, onClose) {
   const browser = findChromiumBrowser();
   if (browser) {
-    const profileDir = path.join(os.tmpdir(), 'triage-gui-profile');
+    // A per-instance profile directory. A shared one makes a second instance
+    // (notably the elevated relaunch) forward its URL to the first Chromium and
+    // exit immediately, which would fire our exit-tie and kill the new backend.
+    const profileDir = path.join(os.tmpdir(), `triage-gui-profile-${port}`);
     try {
       const child = spawn(browser, [
         `--app=${url}`,
@@ -1032,10 +1035,14 @@ function hideOwnConsole() {
 [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);
 '@
 if (-not ('CMT.Con' -as [type])) { Add-Type -Namespace CMT -Name Con -MemberDefinition $sig }
-$ids = New-Object uint32[] 4
-$n = [CMT.Con]::GetConsoleProcessList($ids, 4)
+$ids = New-Object uint32[] 8
+$n = [CMT.Con]::GetConsoleProcessList($ids, 8)
 $c = [CMT.Con]::GetConsoleWindow()
-if ($n -le 1 -and $c -ne [IntPtr]::Zero) { [void][CMT.Con]::ShowWindow($c, 0) }
+# This PowerShell helper shares (and is counted on) the console, so our own
+# dedicated console holds exactly two processes -- the executable and this
+# helper. A console shared with a shell holds at least three, so it is left
+# visible.
+if ($n -le 2 -and $c -ne [IntPtr]::Zero) { [void][CMT.Con]::ShowWindow($c, 0) }
 `;
   try {
     fs.writeFileSync(psFile, '﻿' + script, 'utf8');
@@ -1132,7 +1139,7 @@ function startGui(args) {
     console.log(grn(`\n  GUI listening: ${url}`));
     console.log(dim('  press Ctrl+C to stop.\n'));
     if (!noOpen) {
-      const child = openGuiWindow(url, shutdown);
+      const child = openGuiWindow(url, port, shutdown);
       if (child) {
         // We own this window: its close is our shutdown, and we hide the
         // leftover console (our own double-click console only).

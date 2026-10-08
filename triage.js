@@ -118,6 +118,50 @@ function Get-CachedSignature($dll) {
   $script:SigDirty = $true
   return $entry
 }
+# Load-cost probe. The dominant cause of a slow right-click menu is a handler
+# DLL that is expensive to load (heavy DllMain, cold disk, network path). We
+# time a real LoadLibraryEx of each third-party DLL once and cache it like the
+# signature result. This loads the DLL (runs its DllMain) but never creates the
+# COM object, so the shell extension's own menu code is not executed here.
+$LoadCachePath = Join-Path $env:TEMP 'triage-loadcache.json'
+$LoadCache = @{}
+if (Test-Path -LiteralPath $LoadCachePath) {
+  try {
+    $loaded = Get-Content -LiteralPath $LoadCachePath -Raw | ConvertFrom-Json
+    foreach ($p in $loaded.PSObject.Properties) { $LoadCache[$p.Name] = $p.Value }
+  } catch { $LoadCache = @{} }
+}
+$LoadDirty = $false
+if (-not ('Triage.Native' -as [type])) {
+  try {
+    Add-Type -Namespace Triage -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr LoadLibraryEx(string path, System.IntPtr file, uint flags);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool FreeLibrary(System.IntPtr module);
+'@
+  } catch {}
+}
+function Get-CachedLoad($dll) {
+  $item = Get-Item -LiteralPath $dll -ErrorAction SilentlyContinue
+  if (-not $item) { return $null }
+  $key = $dll.ToLowerInvariant() + '|' + $item.Length + '|' + $item.LastWriteTimeUtc.Ticks
+  if ($LoadCache.ContainsKey($key)) { return $LoadCache[$key] }
+  $ms = $null
+  if ('Triage.Native' -as [type]) {
+    try {
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      # 0x8 = LOAD_WITH_ALTERED_SEARCH_PATH, so the DLL's own folder resolves its imports.
+      $h = [Triage.Native]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x8)
+      $sw.Stop()
+      if ($h -ne [IntPtr]::Zero) { [void][Triage.Native]::FreeLibrary($h); $ms = [int]$sw.Elapsed.TotalMilliseconds }
+    } catch { $ms = $null }
+  }
+  $entry = [pscustomobject]@{ ms = $ms }
+  $LoadCache[$key] = $entry
+  $script:LoadDirty = $true
+  return $entry
+}
 function Open-Key($hive, $subkey, $view) {
   $h = if ($hive -eq 'HKCU') {
     [Microsoft.Win32.RegistryHive]::CurrentUser
@@ -287,14 +331,22 @@ $results = @(foreach ($entry in @($map.Values)) {
   $dll = if ($primary) { $primary.dll } else { $null }
   $exists = [bool]($dll -and (Test-Path -LiteralPath $dll))
   $status = 'None'; $signer = $null; $underWin = $false
+  $loadMs = $null; $sizeBytes = $null; $remote = $false
   if ($dll) {
     $wr = ('' + $env:SystemRoot).TrimEnd('\').ToLowerInvariant() + '\'
     $underWin = $dll.ToLowerInvariant().StartsWith($wr)
+    $remote = ($dll -match '^\\\\') -or ($dll -match '^[A-Za-z]:' -and [IO.DriveInfo]::new($dll.Substring(0,1)).DriveType -in @('Network','Removable'))
     if ($exists) {
       $cachedSig = Get-CachedSignature $dll
       if ($null -ne $cachedSig) {
         $status = $cachedSig.status
         $signer = $cachedSig.signer
+      }
+      $sizeBytes = (Get-Item -LiteralPath $dll -ErrorAction SilentlyContinue).Length
+      # Only probe non-Windows DLLs: system DLLs are catalog-fast and always loaded.
+      if (-not $underWin) {
+        $cachedLoad = Get-CachedLoad $dll
+        if ($null -ne $cachedLoad) { $loadMs = $cachedLoad.ms }
       }
     }
   }
@@ -309,11 +361,15 @@ $results = @(foreach ($entry in @($map.Values)) {
     surfaces = $surfaces; registrations = @($entry.registrations); comServers = @($servers)
     clsidRegistered = $clsidRegistered; inprocRegistered = $inprocRegistered
     writableMissingPath = $writableMissingPath
+    loadMs = $loadMs; sizeBytes = $sizeBytes; remotePath = $remote
     blocked = [bool]$blocked[$entry.clsid]
   }
 })
 if ($SigDirty) {
   try { $SigCache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $SigCachePath -Encoding UTF8 } catch {}
+}
+if ($LoadDirty) {
+  try { $LoadCache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $LoadCachePath -Encoding UTF8 } catch {}
 }
 $results | ConvertTo-Json -Depth 8
 `;
@@ -321,14 +377,20 @@ $results | ConvertTo-Json -Depth 8
 function enumerate(scope = 'all') {
   if (!['all', 'broad'].includes(scope)) fail('scope must be all or broad');
   const script = `$TriageScope = '${scope}'\n${PS}`;
-  const b64 = Buffer.from(script, 'utf16le').toString('base64');
+  // The script is too large for -EncodedCommand (command-line length limit), so
+  // run it from a temp .ps1 file. UTF-8 BOM makes Windows PowerShell read it as
+  // UTF-8 rather than ANSI.
+  const scriptFile = path.join(os.tmpdir(), `triage-scan-${crypto.randomBytes(6).toString('hex')}.ps1`);
   let raw;
   try {
+    fs.writeFileSync(scriptFile, '﻿' + script, 'utf8');
     raw = execFileSync('powershell',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64],
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile],
       { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', env: powershellEnv() });
   } catch (e) {
     fail('powershell enumeration failed: ' + (e.message || e));
+  } finally {
+    try { fs.unlinkSync(scriptFile); } catch {}
   }
   let data = JSON.parse(raw.trim() || '[]');
   if (!Array.isArray(data)) data = [data];
@@ -912,7 +974,7 @@ function findChromiumBrowser() {
 // Open the GUI as its own chromeless window (Chromium --app mode). A dedicated
 // user-data-dir guarantees a separate window even when the browser is already
 // running. Falls back to the default browser as a tab if no Chromium is found.
-function openGuiWindow(url) {
+function openGuiWindow(url, onClose) {
   const browser = findChromiumBrowser();
   if (browser) {
     const profileDir = path.join(os.tmpdir(), 'triage-gui-profile');
@@ -920,20 +982,50 @@ function openGuiWindow(url) {
       const child = spawn(browser, [
         `--app=${url}`,
         `--user-data-dir=${profileDir}`,
+        '--start-maximized',
         '--window-size=1200,800',
         '--no-first-run',
         '--no-default-browser-check',
       ], { detached: true, stdio: 'ignore' });
       child.on('error', () => openGuiTab(url));
-      child.unref();
-      return;
+      // Tie the backend's life to the window: when the GUI window closes, the
+      // server exits too, so no orphaned process or console is left behind.
+      if (typeof onClose === 'function') child.on('exit', onClose);
+      return true;
     } catch { /* fall through to tab */ }
   }
   openGuiTab(url);
+  return false;
 }
 
 function openGuiTab(url) {
   try { execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' }); } catch {}
+}
+
+// Hide the console window, but only when it is our own dedicated console (a
+// double-clicked exe), never a terminal the user launched us from. A console
+// with exactly one attached process is ours; a shell shares its console with us.
+function hideOwnConsole() {
+  if (process.platform !== 'win32') return;
+  const psFile = path.join(os.tmpdir(), `triage-hidecon-${crypto.randomBytes(5).toString('hex')}.ps1`);
+  const script = `$sig = @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint GetConsoleProcessList(uint[] ids, uint count);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);
+'@
+if (-not ('CMT.Con' -as [type])) { Add-Type -Namespace CMT -Name Con -MemberDefinition $sig }
+$ids = New-Object uint32[] 4
+$n = [CMT.Con]::GetConsoleProcessList($ids, 4)
+$c = [CMT.Con]::GetConsoleWindow()
+if ($n -le 1 -and $c -ne [IntPtr]::Zero) { [void][CMT.Con]::ShowWindow($c, 0) }
+`;
+  try {
+    fs.writeFileSync(psFile, '﻿' + script, 'utf8');
+    // stdio inherit so the child shares (and can act on) our console.
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', psFile],
+      { stdio: 'inherit', env: powershellEnv() });
+  } catch {}
+  finally { try { fs.unlinkSync(psFile); } catch {} }
 }
 
 function startGui(args) {
@@ -1015,7 +1107,12 @@ function startGui(args) {
     const url = `http://${host}:${port}/?t=${token}`;
     console.log(grn(`\n  GUI listening: ${url}`));
     console.log(dim('  press Ctrl+C to stop.\n'));
-    if (!noOpen) openGuiWindow(url);
+    if (!noOpen) {
+      const windowed = openGuiWindow(url, shutdown);
+      // When we opened our own window, hide the leftover console (double-click
+      // launch only; a user's terminal is left alone).
+      if (windowed) hideOwnConsole();
+    }
   });
 }
 

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Each handler now shows a load-cost rating, colour-coded from green to red, built from a timed load of its DLL plus signals like a missing registration, a network or removable path, and signature. A registered handler whose DLL is gone rates worst, since Explorer blocks on it; trusted Windows handlers rate lowest and are flagged as safe to leave alone. The worst offenders sort to the top so a slow right-click menu is easy to trace.
+- Handlers can be filtered to enabled-only or disabled-only, and sorted by load cost, by enabled/disabled, or by name.
+- The window opens maximised and stays resizable; at narrower widths the layout tightens in place instead of reflowing its columns, so nothing jumps around when you resize.
+- The portable executable no longer leaves a console window behind: its own console is hidden on launch, and the backend exits when you close the GUI window. A console you launched it from yourself is left untouched.
 - The GUI backend now shuts down with whoever launched it instead of lingering: it exits when its parent's stdin closes (native shell or terminal, on a clean exit or a force-kill), and an elevated GUI exits when the process that launched it goes away. This stops orphaned local servers from accumulating and holding their ports.
 - A GUI launch on a port that is already in use now fails with a clear message instead of an unhandled crash.
 

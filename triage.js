@@ -118,11 +118,13 @@ function Get-CachedSignature($dll) {
   $script:SigDirty = $true
   return $entry
 }
-# Load-cost probe. The dominant cause of a slow right-click menu is a handler
-# DLL that is expensive to load (heavy DllMain, cold disk, network path). We
-# time a real LoadLibraryEx of each third-party DLL once and cache it like the
-# signature result. This loads the DLL (runs its DllMain) but never creates the
-# COM object, so the shell extension's own menu code is not executed here.
+# Load-cost probe. A common cause of a slow right-click menu is a handler DLL
+# that is expensive to bring in from disk (large image, cold cache, network
+# path). We time mapping each DLL once and cache it like the signature result.
+# The DLL is mapped as a data image (LOAD_LIBRARY_AS_IMAGE_RESOURCE |
+# LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE), which creates the file section WITHOUT
+# running DllMain, so enumeration never executes third-party code -- this
+# matters because the GUI may be running elevated.
 $LoadCachePath = Join-Path $env:TEMP 'triage-loadcache.json'
 $LoadCache = @{}
 if (Test-Path -LiteralPath $LoadCachePath) {
@@ -151,8 +153,9 @@ function Get-CachedLoad($dll) {
   if ('Triage.Native' -as [type]) {
     try {
       $sw = [System.Diagnostics.Stopwatch]::StartNew()
-      # 0x8 = LOAD_WITH_ALTERED_SEARCH_PATH, so the DLL's own folder resolves its imports.
-      $h = [Triage.Native]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x8)
+      # 0x20|0x40 = LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE:
+      # map the image without running DllMain, so no handler code executes.
+      $h = [Triage.Native]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x60)
       $sw.Stop()
       if ($h -ne [IntPtr]::Zero) { [void][Triage.Native]::FreeLibrary($h); $ms = [int]$sw.Elapsed.TotalMilliseconds }
     } catch { $ms = $null }
@@ -343,8 +346,11 @@ $results = @(foreach ($entry in @($map.Values)) {
         $signer = $cachedSig.signer
       }
       $sizeBytes = (Get-Item -LiteralPath $dll -ErrorAction SilentlyContinue).Length
-      # Only probe non-Windows DLLs: system DLLs are catalog-fast and always loaded.
-      if (-not $underWin) {
+      # Probe only local, validly-signed, non-Windows DLLs. System DLLs are
+      # catalog-fast; unsigned or remote DLLs are left unmapped and scored from
+      # static signals instead. The mapping is data-only (no DllMain), so this is
+      # a read, not code execution, which is why a valid signature is enough.
+      if (-not $underWin -and -not $remote -and $status -eq 'Valid') {
         $cachedLoad = Get-CachedLoad $dll
         if ($null -ne $cachedLoad) { $loadMs = $cachedLoad.ms }
       }

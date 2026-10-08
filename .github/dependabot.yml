@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # Rust dependencies of the Tauri desktop shell. open-pull-requests-limit: 0
+  # keeps version-bump PRs off while still allowing security updates, so the
+  # noise stays low. glib is ignored because it is a Linux/GTK-only transitive
+  # dependency of Tauri (GTK + WebKitGTK); this app ships a Windows build
+  # (WebView2), where glib is never compiled or shipped, so the RUSTSEC advisory
+  # on glib 0.18.x does not affect the released binary and cannot be bumped in
+  # isolation anyway (it is pinned deep in Tauri's Linux stack).
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: "glib"
+      - dependency-name: "glib-sys"
+
+  # npm dependencies of the CLI/GUI build tooling.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # The GitHub Actions used by CI and the release workflow.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

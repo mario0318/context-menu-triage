@@ -55,6 +55,19 @@ test('keeps Windows-path classification path first', () => {
   assert.equal(actual.thirdParty, false);
 });
 
+test('scores a missing system-path handler as a top offender, not trusted-low', () => {
+  const missingSystem = cook(row({
+    dll: 'C:\\Windows\\System32\\gone.dll', underWindows: true, signer: null,
+    sigStatus: 'None', exists: false,
+  }));
+  assert.equal(missingSystem.orphan, true);
+  assert.equal(missingSystem.costBand, 'severe');
+  assert.ok(missingSystem.costScore >= 70, `expected >=70, got ${missingSystem.costScore}`);
+
+  const presentSystem = cook(row({ dll: 'C:\\Windows\\System32\\shell32.dll', underWindows: true, signer: null }));
+  assert.equal(presentSystem.costBand, 'low');
+});
+
 test('distinguishes stale COM registration states', () => {
   assert.equal(cook(row({ clsidRegistered: false, inprocRegistered: false, dll: null, exists: false })).comState, 'missing-clsid');
   assert.equal(cook(row({ inprocRegistered: false, dll: null, exists: false })).comState, 'missing-inproc');

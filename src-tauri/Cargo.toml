@@ -1,6 +1,6 @@
 [package]
 name = "context-menu-triage-app"
-version = "1.4.0"
+version = "1.4.1"
 description = "Context Menu Triage desktop shell"
 authors = ["mario0318"]
 edition = "2021"

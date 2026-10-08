@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1 - 2026-10-08
+
+- "Launch as administrator" works again: each portable window uses its own browser profile, so opening an elevated window no longer forwards to the first window and kills its own backend.
+- The portable executable's console is now actually hidden on launch; the earlier check counted itself and never triggered.
+- A handler whose DLL under the Windows folder has been deleted now rates among the worst offenders instead of being mistaken for a trusted system handler left alone.
+
 ## 1.4.0 - 2026-10-08
 
 - "Launch as administrator" now does what it says. The portable window opens an elevated window and closes the unelevated one so there is a single window, and the native app restarts itself elevated; a cancelled UAC prompt is reported rather than silently doing nothing. An elevated window owns its own lifetime, so it no longer lingers after its window closes.

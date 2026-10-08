@@ -118,6 +118,53 @@ function Get-CachedSignature($dll) {
   $script:SigDirty = $true
   return $entry
 }
+# Load-cost probe. A common cause of a slow right-click menu is a handler DLL
+# that is expensive to bring in from disk (large image, cold cache, network
+# path). We time mapping each DLL once and cache it like the signature result.
+# The DLL is mapped as a data image (LOAD_LIBRARY_AS_IMAGE_RESOURCE |
+# LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE), which creates the file section WITHOUT
+# running DllMain, so enumeration never executes third-party code -- this
+# matters because the GUI may be running elevated.
+$LoadCachePath = Join-Path $env:TEMP 'triage-loadcache.json'
+$LoadCache = @{}
+if (Test-Path -LiteralPath $LoadCachePath) {
+  try {
+    $loaded = Get-Content -LiteralPath $LoadCachePath -Raw | ConvertFrom-Json
+    foreach ($p in $loaded.PSObject.Properties) { $LoadCache[$p.Name] = $p.Value }
+  } catch { $LoadCache = @{} }
+}
+$LoadDirty = $false
+if (-not ('Triage.Native' -as [type])) {
+  try {
+    Add-Type -Namespace Triage -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr LoadLibraryEx(string path, System.IntPtr file, uint flags);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool FreeLibrary(System.IntPtr module);
+'@
+  } catch {}
+}
+function Get-CachedLoad($dll) {
+  $item = Get-Item -LiteralPath $dll -ErrorAction SilentlyContinue
+  if (-not $item) { return $null }
+  $key = $dll.ToLowerInvariant() + '|' + $item.Length + '|' + $item.LastWriteTimeUtc.Ticks
+  if ($LoadCache.ContainsKey($key)) { return $LoadCache[$key] }
+  $ms = $null
+  if ('Triage.Native' -as [type]) {
+    try {
+      $sw = [System.Diagnostics.Stopwatch]::StartNew()
+      # 0x20|0x40 = LOAD_LIBRARY_AS_IMAGE_RESOURCE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE:
+      # map the image without running DllMain, so no handler code executes.
+      $h = [Triage.Native]::LoadLibraryEx($dll, [IntPtr]::Zero, 0x60)
+      $sw.Stop()
+      if ($h -ne [IntPtr]::Zero) { [void][Triage.Native]::FreeLibrary($h); $ms = [int]$sw.Elapsed.TotalMilliseconds }
+    } catch { $ms = $null }
+  }
+  $entry = [pscustomobject]@{ ms = $ms }
+  $LoadCache[$key] = $entry
+  $script:LoadDirty = $true
+  return $entry
+}
 function Open-Key($hive, $subkey, $view) {
   $h = if ($hive -eq 'HKCU') {
     [Microsoft.Win32.RegistryHive]::CurrentUser
@@ -287,14 +334,25 @@ $results = @(foreach ($entry in @($map.Values)) {
   $dll = if ($primary) { $primary.dll } else { $null }
   $exists = [bool]($dll -and (Test-Path -LiteralPath $dll))
   $status = 'None'; $signer = $null; $underWin = $false
+  $loadMs = $null; $sizeBytes = $null; $remote = $false
   if ($dll) {
     $wr = ('' + $env:SystemRoot).TrimEnd('\').ToLowerInvariant() + '\'
     $underWin = $dll.ToLowerInvariant().StartsWith($wr)
+    $remote = ($dll -match '^\\\\') -or ($dll -match '^[A-Za-z]:' -and [IO.DriveInfo]::new($dll.Substring(0,1)).DriveType -in @('Network','Removable'))
     if ($exists) {
       $cachedSig = Get-CachedSignature $dll
       if ($null -ne $cachedSig) {
         $status = $cachedSig.status
         $signer = $cachedSig.signer
+      }
+      $sizeBytes = (Get-Item -LiteralPath $dll -ErrorAction SilentlyContinue).Length
+      # Probe only local, validly-signed, non-Windows DLLs. System DLLs are
+      # catalog-fast; unsigned or remote DLLs are left unmapped and scored from
+      # static signals instead. The mapping is data-only (no DllMain), so this is
+      # a read, not code execution, which is why a valid signature is enough.
+      if (-not $underWin -and -not $remote -and $status -eq 'Valid') {
+        $cachedLoad = Get-CachedLoad $dll
+        if ($null -ne $cachedLoad) { $loadMs = $cachedLoad.ms }
       }
     }
   }
@@ -309,11 +367,15 @@ $results = @(foreach ($entry in @($map.Values)) {
     surfaces = $surfaces; registrations = @($entry.registrations); comServers = @($servers)
     clsidRegistered = $clsidRegistered; inprocRegistered = $inprocRegistered
     writableMissingPath = $writableMissingPath
+    loadMs = $loadMs; sizeBytes = $sizeBytes; remotePath = $remote
     blocked = [bool]$blocked[$entry.clsid]
   }
 })
 if ($SigDirty) {
   try { $SigCache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $SigCachePath -Encoding UTF8 } catch {}
+}
+if ($LoadDirty) {
+  try { $LoadCache | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $LoadCachePath -Encoding UTF8 } catch {}
 }
 $results | ConvertTo-Json -Depth 8
 `;
@@ -321,14 +383,20 @@ $results | ConvertTo-Json -Depth 8
 function enumerate(scope = 'all') {
   if (!['all', 'broad'].includes(scope)) fail('scope must be all or broad');
   const script = `$TriageScope = '${scope}'\n${PS}`;
-  const b64 = Buffer.from(script, 'utf16le').toString('base64');
+  // The script is too large for -EncodedCommand (command-line length limit), so
+  // run it from a temp .ps1 file. UTF-8 BOM makes Windows PowerShell read it as
+  // UTF-8 rather than ANSI.
+  const scriptFile = path.join(os.tmpdir(), `triage-scan-${crypto.randomBytes(6).toString('hex')}.ps1`);
   let raw;
   try {
+    fs.writeFileSync(scriptFile, '﻿' + script, 'utf8');
     raw = execFileSync('powershell',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64],
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptFile],
       { maxBuffer: 64 * 1024 * 1024, encoding: 'utf8', env: powershellEnv() });
   } catch (e) {
     fail('powershell enumeration failed: ' + (e.message || e));
+  } finally {
+    try { fs.unlinkSync(scriptFile); } catch {}
   }
   let data = JSON.parse(raw.trim() || '[]');
   if (!Array.isArray(data)) data = [data];
@@ -860,9 +928,21 @@ async function handleApi(req, res, route, token, state, port) {
   }
   if (req.method === 'POST' && route === '/api/relaunch-admin') {
     if (isAdmin()) return sendJson(res, 200, { alreadyAdmin: true });
-    // This server keeps running to serve the elevated child's lifecycle: the
-    // child watches our pid and exits when we do (see --parent-pid handling).
-    relaunchGuiAsAdmin(port + 1, scope, process.pid);
+    if (state.noOpen) {
+      // Native shell (Tauri): the window is not ours to relaunch, so signal the
+      // shell to restart the whole app elevated and take over from this one.
+      process.stdout.write('@@TRIAGE-ELEVATE@@\n');
+      return sendJson(res, 200, { launched: true, native: true });
+    }
+    // Portable window: open an elevated window on its own port, then close this
+    // window so the elevated one replaces it instead of leaving two. The
+    // elevated instance owns its own window, so it gets no --parent-pid.
+    try {
+      relaunchGuiAsAdmin(port + 1, scope);
+    } catch (e) {
+      return sendJson(res, 200, { launched: false, error: (e && e.message) || 'elevation canceled' });
+    }
+    if (state.guiChild) setTimeout(() => { try { state.guiChild.kill(); } catch {} }, 1500);
     return sendJson(res, 200, { launched: true, port: port + 1 });
   }
   if (req.method === 'POST' && route === '/api/restart-explorer') {
@@ -912,7 +992,7 @@ function findChromiumBrowser() {
 // Open the GUI as its own chromeless window (Chromium --app mode). A dedicated
 // user-data-dir guarantees a separate window even when the browser is already
 // running. Falls back to the default browser as a tab if no Chromium is found.
-function openGuiWindow(url) {
+function openGuiWindow(url, onClose) {
   const browser = findChromiumBrowser();
   if (browser) {
     const profileDir = path.join(os.tmpdir(), 'triage-gui-profile');
@@ -920,20 +1000,50 @@ function openGuiWindow(url) {
       const child = spawn(browser, [
         `--app=${url}`,
         `--user-data-dir=${profileDir}`,
+        '--start-maximized',
         '--window-size=1200,800',
         '--no-first-run',
         '--no-default-browser-check',
       ], { detached: true, stdio: 'ignore' });
       child.on('error', () => openGuiTab(url));
-      child.unref();
-      return;
+      // Tie the backend's life to the window: when the GUI window closes, the
+      // server exits too, so no orphaned process or console is left behind.
+      if (typeof onClose === 'function') child.on('exit', onClose);
+      return child;
     } catch { /* fall through to tab */ }
   }
   openGuiTab(url);
+  return null;
 }
 
 function openGuiTab(url) {
   try { execFileSync('cmd', ['/c', 'start', '', url], { stdio: 'ignore' }); } catch {}
+}
+
+// Hide the console window, but only when it is our own dedicated console (a
+// double-clicked exe), never a terminal the user launched us from. A console
+// with exactly one attached process is ours; a shell shares its console with us.
+function hideOwnConsole() {
+  if (process.platform !== 'win32') return;
+  const psFile = path.join(os.tmpdir(), `triage-hidecon-${crypto.randomBytes(5).toString('hex')}.ps1`);
+  const script = `$sig = @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint GetConsoleProcessList(uint[] ids, uint count);
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr h, int n);
+'@
+if (-not ('CMT.Con' -as [type])) { Add-Type -Namespace CMT -Name Con -MemberDefinition $sig }
+$ids = New-Object uint32[] 4
+$n = [CMT.Con]::GetConsoleProcessList($ids, 4)
+$c = [CMT.Con]::GetConsoleWindow()
+if ($n -le 1 -and $c -ne [IntPtr]::Zero) { [void][CMT.Con]::ShowWindow($c, 0) }
+`;
+  try {
+    fs.writeFileSync(psFile, '﻿' + script, 'utf8');
+    // stdio inherit so the child shares (and can act on) our console.
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', psFile],
+      { stdio: 'inherit', env: powershellEnv() });
+  } catch {}
+  finally { try { fs.unlinkSync(psFile); } catch {} }
 }
 
 function startGui(args) {
@@ -944,7 +1054,7 @@ function startGui(args) {
   // The GUI defaults to the fast 'broad' scan (7 common right-click surfaces)
   // for a near-instant first paint; the toolbar toggles a full scan on demand.
   // An explicit --scope on the command line still wins.
-  const state = { scope: args.includes('--scope') ? scanScope(args) : 'broad' };
+  const state = { scope: args.includes('--scope') ? scanScope(args) : 'broad', noOpen };
   if (args.includes('--elevate') && !isAdmin()) {
     relaunchGuiAsAdmin(port, state.scope);
     console.log(grn('\n  requested administrator GUI launch.\n'));
@@ -986,26 +1096,32 @@ function startGui(args) {
     try { server.close(); } catch {}
     process.exit(0);
   };
+  state.shutdown = shutdown;
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
+  // Lifecycle: the backend must never outlive whoever launched it (Windows does
+  // not reap child trees). It ties to exactly one owner: an explicit --parent-pid
+  // to poll, else the window it opens, else — when it opens no window of its own
+  // — the stdin the launcher pipes it. A window-owning instance never also
+  // watches stdin, since a detached/elevated launch has no real stdin.
   const parentPidIndex = args.indexOf('--parent-pid');
   const parentPid = parentPidIndex >= 0 ? parseInt(args[parentPidIndex + 1], 10) : NaN;
+  let bound = false;
   if (Number.isInteger(parentPid) && parentPid > 0) {
-    // Detached/elevated child: no stdin link to the launcher, so poll its pid.
     const watch = setInterval(() => {
       let alive = true;
       try { process.kill(parentPid, 0); } catch (e) { alive = e.code === 'EPERM'; }
       if (!alive) shutdown();
     }, 2000);
     watch.unref();
-  } else {
-    // Sidecar/terminal launch: the parent owns our stdin, so its close — on a
-    // clean exit or a force-kill — reaches us as EOF and becomes our shutdown.
+    bound = true;
+  }
+  const watchStdin = () => {
     process.stdin.on('end', shutdown);
     process.stdin.on('close', shutdown);
     process.stdin.on('error', () => {});
     process.stdin.resume();
-  }
+  };
   server.on('error', (e) => {
     fail(e && e.code === 'EADDRINUSE'
       ? `port ${port} is already in use; pass a different --port`
@@ -1015,7 +1131,19 @@ function startGui(args) {
     const url = `http://${host}:${port}/?t=${token}`;
     console.log(grn(`\n  GUI listening: ${url}`));
     console.log(dim('  press Ctrl+C to stop.\n'));
-    if (!noOpen) openGuiWindow(url);
+    if (!noOpen) {
+      const child = openGuiWindow(url, shutdown);
+      if (child) {
+        // We own this window: its close is our shutdown, and we hide the
+        // leftover console (our own double-click console only).
+        state.guiChild = child;
+        bound = true;
+        hideOwnConsole();
+      }
+    }
+    // Nothing else owns our lifetime (native sidecar with piped stdin, a
+    // headless --no-open launch, or a window-less tab fallback): watch stdin.
+    if (!bound) watchStdin();
   });
 }
 

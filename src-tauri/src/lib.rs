@@ -7,7 +7,7 @@
 
 use std::sync::Mutex;
 
-use tauri::{Emitter, LogicalSize, Manager, RunEvent, WebviewWindow};
+use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -31,21 +31,6 @@ fn extract_url(line: &str) -> Option<String> {
     Some(rest[..end].trim().to_string())
 }
 
-// Size the window to comfortably fit the user's monitor — never force a
-// maximize or push controls off-screen on smaller displays.
-fn fit_to_monitor(win: &WebviewWindow) {
-    if let Ok(Some(monitor)) = win.current_monitor() {
-        let scale = monitor.scale_factor();
-        let size = monitor.size();
-        let avail_w = size.width as f64 / scale;
-        let avail_h = size.height as f64 / scale;
-        let w = (avail_w * 0.92).min(1180.0).max(720.0);
-        let h = (avail_h * 0.90).min(760.0).max(480.0);
-        let _ = win.set_size(LogicalSize::new(w, h));
-        let _ = win.center();
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -55,7 +40,9 @@ pub fn run() {
             let handle = app.handle().clone();
 
             if let Some(win) = app.get_webview_window("main") {
-                fit_to_monitor(&win);
+                // Start maximized; the window stays resizable down to minWidth/
+                // minHeight from tauri.conf.json, and the layout shrinks to fit.
+                let _ = win.maximize();
             }
 
             let port = free_port();
@@ -71,10 +58,30 @@ pub fn run() {
                 while let Some(event) = rx.recv().await {
                     match event {
                         CommandEvent::Stdout(bytes) | CommandEvent::Stderr(bytes) => {
+                            let line = String::from_utf8_lossy(&bytes);
+                            // The backend asks us to relaunch the whole app
+                            // elevated (the "launch as administrator" action).
+                            if line.contains("@@TRIAGE-ELEVATE@@") {
+                                if let Ok(exe) = std::env::current_exe() {
+                                    let _ = std::process::Command::new("powershell")
+                                        .args([
+                                            "-NoProfile",
+                                            "-WindowStyle",
+                                            "Hidden",
+                                            "-Command",
+                                            &format!(
+                                                "Start-Process -FilePath \"{}\" -Verb RunAs",
+                                                exe.display()
+                                            ),
+                                        ])
+                                        .spawn();
+                                }
+                                handle.exit(0);
+                                continue;
+                            }
                             if navigated {
                                 continue;
                             }
-                            let line = String::from_utf8_lossy(&bytes);
                             if let Some(url) = extract_url(&line) {
                                 if let (Some(win), Ok(parsed)) =
                                     (handle.get_webview_window("main"), tauri::Url::parse(&url))

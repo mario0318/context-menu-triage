@@ -4,14 +4,15 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write
-  id-token: write # OIDC federated login to Azure for Trusted Signing
+permissions: {}
 
 jobs:
   release:
     runs-on: windows-latest
     environment: release
+    permissions:
+      contents: write # create the GitHub Release
+      id-token: write # OIDC federated login to Azure for Trusted Signing
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -19,8 +20,8 @@ jobs:
           node-version: 24
           cache: npm
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
       - run: npm ci
@@ -60,14 +61,14 @@ jobs:
           }
       - name: Azure login (OIDC)
         if: steps.mode.outputs.signing == 'true'
-        uses: azure/login@v2
+        uses: azure/login@7184910d9eb2b1c5e48f7073824a90609bb9b6d6 # v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Sign installer (Azure Trusted Signing)
         if: steps.mode.outputs.signing == 'true'
-        uses: azure/trusted-signing-action@v0.5.1
+        uses: azure/trusted-signing-action@0d74250c661747df006298d0fb49944c10f16e03 # v0.5.1
         with:
           endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
           trusted-signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}

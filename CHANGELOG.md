@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0 - 2026-10-08
 
 - "Launch as administrator" now does what it says. The portable window opens an elevated window and closes the unelevated one so there is a single window, and the native app restarts itself elevated; a cancelled UAC prompt is reported rather than silently doing nothing. An elevated window owns its own lifetime, so it no longer lingers after its window closes.
 - Each handler now shows a load-cost rating, colour-coded from green to red, built from a timed load of its DLL plus signals like a missing registration, a network or removable path, and signature. A registered handler whose DLL is gone rates worst, since Explorer blocks on it; trusted Windows handlers rate lowest and are flagged as safe to leave alone. The worst offenders sort to the top so a slow right-click menu is easy to trace.

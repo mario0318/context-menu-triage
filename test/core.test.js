@@ -63,6 +63,9 @@ test('scores a missing system-path handler as a top offender, not trusted-low', 
   assert.equal(missingSystem.orphan, true);
   assert.equal(missingSystem.costBand, 'severe');
   assert.ok(missingSystem.costScore >= 70, `expected >=70, got ${missingSystem.costScore}`);
+  // Must be visible by default: an orphan is not a trusted system handler.
+  assert.equal(missingSystem.isMs, false);
+  assert.equal(missingSystem.thirdParty, true);
 
   const presentSystem = cook(row({ dll: 'C:\\Windows\\System32\\shell32.dll', underWindows: true, signer: null }));
   assert.equal(presentSystem.costBand, 'low');

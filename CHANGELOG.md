@@ -4,7 +4,7 @@
 
 - "Launch as administrator" works again: each portable window uses its own browser profile, so opening an elevated window no longer forwards to the first window and kills its own backend.
 - The portable executable's console is now actually hidden on launch; the earlier check counted itself and never triggered.
-- A handler whose DLL under the Windows folder has been deleted now rates among the worst offenders instead of being mistaken for a trusted system handler left alone.
+- A handler whose DLL under the Windows folder has been deleted now rates among the worst offenders and shows in the default view, instead of being mistaken for a trusted system handler and hidden.
 
 ## 1.4.0 - 2026-10-08
 

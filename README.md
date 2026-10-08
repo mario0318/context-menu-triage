@@ -77,7 +77,7 @@ Snapshot schema v2 is published at [`docs/snapshot.schema.json`](docs/snapshot.s
 
 `trusted` means `Get-AuthenticodeSignature` returned `Valid`, which includes certificate-chain validation. A signature blob, self-signed certificate, expired chain, hash mismatch, or unknown error is not treated as trusted.
 
-Windows classification is path first because catalog-signed system DLLs can be valid while exposing no leaf signer certificate. A DLL under `%SystemRoot%` is treated as Windows unless a valid non-Microsoft signer proves otherwise. Microsoft-valid signatures are also classified as Windows. Every row includes the reason for its classification.
+Windows classification is path first because catalog-signed system DLLs can be valid while exposing no leaf signer certificate. A present DLL under `%SystemRoot%` is treated as Windows unless a valid non-Microsoft signer proves otherwise. Microsoft-valid signatures are also classified as Windows. A registration whose DLL or COM server is missing is an orphan, never Windows, even on a system path, so it stays visible rather than hidden with trusted handlers. Every row includes the reason for its classification.
 
 PowerShell still performs registry and Authenticode work underneath the Node interface. This does not bypass execution policy or constrained language mode. Node is used to provide one file for both CLI and local web UI with one consistent JSON model.
 

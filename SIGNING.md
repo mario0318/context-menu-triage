@@ -17,7 +17,7 @@ Azure Trusted Signing is a paid service (Basic plan ~$9.99/month). As of its gen
 1. In the Azure portal, register the `Microsoft.CodeSigning` resource provider on the subscription.
 2. Create a **Trusted Signing account** and a **certificate profile** of type **Public Trust** (identity validation: Individual). Note the account's region endpoint, e.g. `https://eus.codesigning.azure.net/`, the account name, and the certificate-profile name.
 3. Create an **Entra ID app registration** (or a user-assigned managed identity) to act as the signing identity. Record its **client ID**, the **tenant ID**, and the **subscription ID**.
-4. Grant that identity the **Trusted Signing Certificate Profile Signer** role on the Trusted Signing account (or on the certificate profile).
+4. Grant that identity the **Artifact Signing Certificate Profile Signer** role (role ID `2837e146-70d7-4cfd-ad55-7efa6464f958`; formerly named "Trusted Signing Certificate Profile Signer") on the Trusted Signing account. The role may not appear by name in the portal/CLI until the provider's roles propagate after first registration; assigning by the role ID works immediately.
 5. Add a **federated credential** to the app registration for GitHub OIDC, so no client secret is stored:
    - Issuer: `https://token.actions.githubusercontent.com`
    - Subject: `repo:mario0318/context-menu-triage:environment:release`

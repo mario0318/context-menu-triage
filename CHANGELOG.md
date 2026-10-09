@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2 - 2026-10-09
+
+- First signed release. The installer now carries a valid Authenticode signature from Azure Trusted Signing, so Windows SmartScreen identifies the verified publisher instead of warning about an unknown one. No functional changes from 1.4.1.
+
 ## 1.4.1 - 2026-10-08
 
 - "Launch as administrator" works again: each portable window uses its own browser profile, so opening an elevated window no longer forwards to the first window and kills its own backend.

@@ -1,30 +1,27 @@
 # Code Signing Policy
 
-Context Menu Triage does not currently have an active Authenticode signing certificate. The SignPath Foundation application was declined, so the project targets **Azure Trusted Signing** (Azure Artifact Signing) as its signing provider; the release workflow signs automatically once that account is provisioned and its repository variables are set. See the [signing setup](SIGNING.md).
+Context Menu Triage releases are signed with a public-trust Authenticode certificate from **Azure Trusted Signing** (Azure Artifact Signing), starting with 1.4.2. The certificate subject is Raul Torres, issued by Microsoft ID Verified CS AOC CA 03. The SignPath Foundation application was declined, so that path is retired. See the [signing setup](SIGNING.md).
 
-Current releases are unsigned and labeled accordingly. They are built from version tags by the public GitHub Actions workflow and include a SHA-256 checksum, CycloneDX SBOM, GitHub release-asset digest, and source tag. Users should verify the checksum before running an installer.
-
-If signing is configured later, a release must be built from a version tag by the public GitHub Actions workflow, manually approved by the maintainer, timestamped, and verified as a valid Authenticode signature before publication. Its release notes will identify the certificate issuer and signing path.
+Every signed release is built from a version tag by the public GitHub Actions workflow, manually approved by the maintainer, timestamped, and verified as a valid Authenticode signature before publication. It also includes a SHA-256 checksum, CycloneDX SBOM, GitHub release-asset digest, and source tag. Releases before 1.4.2 are unsigned and labeled accordingly.
 
 ## Team Roles
 
 - Committer and reviewer: [mario0318](https://github.com/mario0318)
 - Signing approver: [mario0318](https://github.com/mario0318)
 
-The maintainer uses multi-factor authentication for GitHub. Contributions from anyone without direct commit access require review before merge. Every future release-signing request requires manual approval.
+The maintainer uses multi-factor authentication for GitHub. Contributions from anyone without direct commit access require review before merge. Every release-signing request requires manual approval.
 
 ## Build Integrity
 
 - Source repository: <https://github.com/mario0318/context-menu-triage>
 - Build system: GitHub Actions on GitHub-hosted Windows runners
 - Release trigger: a `v*` tag that matches `package.json`
-- Current artifact: `context-menu-triage-setup.exe` (unsigned)
+- Current artifact: `context-menu-triage-setup.exe` (Authenticode-signed)
 - Required PE product name: `Context Menu Triage`
 - Required file and product version: the release version
-- Current verification: executable smoke test, SHA-256 checksum, GitHub release-asset digest, and CycloneDX SBOM
-- Future signed-release verification: valid Authenticode status, executable smoke test, SHA-256 checksum, and CycloneDX SBOM
+- Verification: valid Authenticode status, executable smoke test, SHA-256 checksum, GitHub release-asset digest, and CycloneDX SBOM
 
-The release workflow uploads the installer and its verification material to GitHub Releases. If signing is configured, it must publish only the installer returned by the signing provider after signature validation.
+The release workflow uploads the installer and its verification material to GitHub Releases. It publishes only the installer returned by the signing provider after signature validation.
 
 ## Privacy
 

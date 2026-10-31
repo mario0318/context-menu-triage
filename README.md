@@ -17,7 +17,7 @@ Download and run the installer: **[context-menu-triage-setup.exe](https://github
 
 Context Menu Triage is a native Windows desktop application (Tauri + WebView2). The installer is **per-user** and needs no administrator rights to install; disabling, enabling, or importing handlers requests administrator rights at the moment they are used. The app opens in its own window with its own icon.
 
-The current release is **unsigned**. Windows SmartScreen may warn about an unknown publisher. Verify each download against its published `.sha256` checksum before running it. The release also includes a CycloneDX SBOM and GitHub's published asset digest.
+Releases from 1.4.2 on are **signed** with a public-trust Authenticode certificate from Azure Trusted Signing (publisher: Raul Torres, issued by Microsoft ID Verified CS AOC CA 03), so Windows SmartScreen shows a verified publisher. Check the signature under the installer's **Properties > Digital Signatures**, or with `Get-AuthenticodeSignature .\context-menu-triage-setup.exe`. Each release also ships a `.sha256` checksum, a CycloneDX SBOM and GitHub's published asset digest. Releases before 1.4.2 are unsigned.
 
 From source, install Node.js 20 or newer and run:
 
@@ -101,4 +101,4 @@ See [SECURITY.md](SECURITY.md) for security boundaries and reporting guidance, a
 
 ## Code Signing Policy
 
-There is no active Authenticode signing certificate for this project today. Releases are labeled unsigned and ship with a SHA-256 checksum and SBOM so their contents can be independently verified. A future signed release will name its certificate issuer and include signature-verification instructions. See the [code signing policy](CODE_SIGNING_POLICY.md), [privacy policy](PRIVACY.md), and maintainer [signing setup](SIGNING.md).
+Releases from 1.4.2 on are Authenticode-signed through Azure Trusted Signing, timestamped, and verified as a valid signature by the release workflow before publication. They also ship a SHA-256 checksum and SBOM so their contents can be independently verified. Earlier releases are unsigned and labeled as such. See the [code signing policy](CODE_SIGNING_POLICY.md), [privacy policy](PRIVACY.md), and maintainer [signing setup](SIGNING.md).

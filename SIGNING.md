@@ -1,6 +1,6 @@
 # Signing Setup
 
-Stable Windows releases are signed with **Azure Trusted Signing** (Azure Artifact Signing), a Microsoft-managed public-trust Authenticode service. The SignPath Foundation application was declined, so that path is retired. Signing is gated: until the Azure variables below are set on the repository, the release workflow publishes a clearly labelled unsigned build. Once they are set, the same workflow signs the installer and requires a valid Authenticode signature before publishing.
+Stable Windows releases are signed with **Azure Trusted Signing** (Azure Artifact Signing), a Microsoft-managed public-trust Authenticode service. The SignPath Foundation application was declined, so that path is retired. Signing is live as of 1.4.2: the Azure variables below are set, so the release workflow signs the installer and requires a valid Authenticode signature before publishing. If they are ever removed, the workflow falls back to a clearly labelled unsigned build.
 
 Azure Trusted Signing is a paid service (Basic plan ~$9.99/month). As of its general availability it accepts self-employed individuals with no multi-year business-history requirement; the signer must be in the US, Canada, EU, or UK for a public-trust certificate.
 

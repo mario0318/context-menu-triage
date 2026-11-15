@@ -15,8 +15,8 @@ jobs:
       matrix:
         node: [20, 22, 24]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -25,11 +25,35 @@ jobs:
       - run: npm test
       - run: npm run test:windows
 
+  desktop:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - run: npm run build:exe -- --SkipSign
+      - run: npm run sidecar
+      - run: npm exec -- tauri build
+      - name: Check installer was built
+        shell: powershell
+        run: |
+          $installer = Get-ChildItem src-tauri/target/release/bundle/nsis/*_x64-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer not found' }
+
   package:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -44,7 +68,7 @@ jobs:
           if (-not $info.ProductVersion.StartsWith("$version.")) { throw "Unexpected ProductVersion: $($info.ProductVersion)" }
           if ($info.OriginalFilename -ne 'context-menu-triage.exe') { throw "Unexpected OriginalFilename: $($info.OriginalFilename)" }
       - run: .\dist\context-menu-triage.exe audit --scope broad --quiet
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: context-menu-triage-windows-x64
           path: |
